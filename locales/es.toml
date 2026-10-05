@@ -802,3 +802,8 @@
 "Client" = "Cliente"
 "Default sorting" = "Orden por defecto"
 "How a new tab sorts on a header click. Server runs the query again, sorted by the database; Client reorders the rows already loaded, so a table sorts only the page on screen. Tabs already open keep theirs; each can be switched from its status bar." = "Cómo ordena una pestaña nueva al pulsar una cabecera. Servidor vuelve a lanzar la consulta, ordenada por la base de datos; Cliente reordena las filas ya cargadas, así que una tabla solo ordena la página en pantalla. Las pestañas abiertas conservan el suyo; cada una puede cambiarlo desde su barra de estado."
+"1:1, optional" = "1:1, opcional"
+"1:1, required" = "1:1, obligatoria"
+"N:1, optional" = "N:1, opcional"
+"N:1, required" = "N:1, obligatoria"
+"{} views" = "{} vistas"

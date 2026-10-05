@@ -29,6 +29,9 @@ const ZOOM_MAX: f32 = 2.0;
 const CLICK_SLOP: f32 = 4.0;
 /// The room left round the diagram when it is fitted to the window.
 const FIT_MARGIN: f32 = 40.0;
+/// The hue a view's box wears, so a picture of the schema tells what holds
+/// rows from what only names a query. Purple, as nothing else here is.
+const VIEW_COLOR: ConnectionColor = ConnectionColor::Purple;
 
 pub(crate) struct DiagramView {
     pub(crate) schema: String,
@@ -39,6 +42,11 @@ pub(crate) struct DiagramView {
     gesture: Option<Gesture>,
     /// The box under the pointer, whose lines are drawn in the accent.
     hovered: Option<usize>,
+    /// The line under the pointer, by index into the diagram's links: drawn in
+    /// the accent and named beside the pointer.
+    hovered_link: Option<usize>,
+    /// The pointer on the surface, for that label to sit beside.
+    pointer: Point<f32>,
     /// Which load this view is waiting on, so a reopen for another schema
     /// while one was in flight cannot be overwritten by the slower answer.
     request: u64,
@@ -103,6 +111,61 @@ impl DiagramView {
         )
     }
 
+    /// Every line's geometry on the surface, and whether it is lit: its own
+    /// pointer is on it, or on either box it joins.
+    fn lines(&self, diagram: &Diagram) -> Vec<Line> {
+        let (zoom, pan) = (self.zoom, self.pan);
+        let place = |x: f32, y: f32| Point::new(pan.x + x * zoom, pan.y + y * zoom);
+        // Each end in diagram units: (x, y, way) for the start and the end.
+        let ends: Vec<(End, End)> = diagram
+            .links
+            .iter()
+            .map(|link| {
+                let (from, to) = (&diagram.tables[link.from], &diagram.tables[link.to]);
+                let from_y = from.row_middle(link.from_row);
+                let to_y = to.row_middle(link.to_row);
+                let (from_x, to_x, start_way, end_way) = if link.from == link.to {
+                    // A table pointing at itself: a loop off its right edge.
+                    (from.x + BOX_WIDTH, from.x + BOX_WIDTH, 1.0, 1.0)
+                } else if from.x + BOX_WIDTH / 2.0 >= to.x + BOX_WIDTH / 2.0 {
+                    // Leave from whichever side faces the other box.
+                    (from.x, to.x + BOX_WIDTH, -1.0, 1.0)
+                } else {
+                    (from.x + BOX_WIDTH, to.x, 1.0, -1.0)
+                };
+                ((from_x, from_y, start_way), (to_x, to_y, end_way))
+            })
+            .collect();
+        let spread = spread_shared_ends(&ends);
+        diagram
+            .links
+            .iter()
+            .enumerate()
+            .zip(&ends)
+            .zip(spread)
+            .map(
+                |(
+                    ((index, link), &(start, end)),
+                    (start_shift, end_shift, start_half, end_half),
+                )| {
+                    Line {
+                        link: index,
+                        start: place(start.0, start.1 + start_shift),
+                        end: place(end.0, end.1 + end_shift),
+                        start_way: start.2,
+                        end_way: end.2,
+                        start_half: start_half * zoom,
+                        end_half: end_half * zoom,
+                        highlighted: self.hovered_link == Some(index)
+                            || self.hovered.is_some_and(|h| h == link.from || h == link.to),
+                        one_to_one: link.one_to_one,
+                        optional: link.optional,
+                    }
+                },
+            )
+            .collect()
+    }
+
     /// The middle of the surface, which the zoom buttons zoom around.
     fn middle(&self) -> Point<f32> {
         self.surface.get().map_or(Point::default(), |bounds| {
@@ -118,6 +181,8 @@ impl DiagramView {
 /// numbers and not the diagram.
 #[derive(Clone, Copy)]
 struct Line {
+    /// Which of the diagram's links this draws.
+    link: usize,
     /// On the referencing box's edge.
     start: Point<f32>,
     /// On the referenced box's edge.
@@ -132,6 +197,60 @@ struct Line {
     one_to_one: bool,
     optional: bool,
 }
+
+impl Line {
+    /// The four points of the cubic the line is drawn as. It leaves and meets
+    /// each box level, which is what keeps the end marks square to it.
+    fn curve(&self, zoom: f32) -> [Point<f32>; 4] {
+        let (start, end) = (self.start, self.end);
+        let reach = match start.x == end.x {
+            true => 60.0 * zoom,
+            false => ((end.x - start.x).abs() / 2.0).max(40.0 * zoom),
+        };
+        [
+            start,
+            Point::new(start.x + self.start_way * reach, start.y),
+            Point::new(end.x + self.end_way * reach, end.y),
+            end,
+        ]
+    }
+
+    /// How far `point` is from the drawn curve, measured against a polyline
+    /// through it: close enough for picking which line the pointer is on.
+    fn distance(&self, zoom: f32, point: Point<f32>) -> f32 {
+        const STEPS: usize = 24;
+        let [p0, p1, p2, p3] = self.curve(zoom);
+        let at = |t: f32| {
+            let u = 1.0 - t;
+            let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            Point::new(
+                a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+                a * p0.y + b * p1.y + c * p2.y + d * p3.y,
+            )
+        };
+        (0..STEPS)
+            .map(|step| {
+                let (a, b) = (
+                    at(step as f32 / STEPS as f32),
+                    at((step + 1) as f32 / STEPS as f32),
+                );
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let length = dx * dx + dy * dy;
+                let t = match length > 0.0 {
+                    true => {
+                        (((point.x - a.x) * dx + (point.y - a.y) * dy) / length).clamp(0.0, 1.0)
+                    }
+                    false => 0.0,
+                };
+                let (x, y) = (a.x + t * dx - point.x, a.y + t * dy - point.y);
+                (x * x + y * y).sqrt()
+            })
+            .fold(f32::MAX, f32::min)
+    }
+}
+
+/// How near the pointer has to come to a line, in window pixels, to pick it.
+const LINE_PICK: f32 = 6.0;
 
 enum DiagramState {
     Loading,
@@ -181,6 +300,8 @@ impl Workspace {
             zoom: 1.0,
             gesture: None,
             hovered: None,
+            hovered_link: None,
+            pointer: Point::default(),
             request,
             surface: self
                 .diagram
@@ -289,11 +410,15 @@ impl Workspace {
             DiagramState::Loading => tr("Reading the schema…").to_string(),
             DiagramState::Failed(_) => String::new(),
             DiagramState::Loaded(diagram) => {
+                let views = diagram.tables.iter().filter(|t| t.is_view()).count();
                 let mut parts = vec![trf!(
                     "{} tables, {} relationships",
-                    diagram.tables.len(),
+                    diagram.tables.len() - views,
                     diagram.links.len()
                 )];
+                if views > 0 {
+                    parts.push(trf!("{} views", views));
+                }
                 if diagram.left_out > 0 {
                     parts.push(trf!("{} not drawn", diagram.left_out));
                 }
@@ -448,46 +573,7 @@ impl Workspace {
         let (zoom, pan) = (view.zoom, view.pan);
         let place = |x: f32, y: f32| Point::new(pan.x + x * zoom, pan.y + y * zoom);
 
-        // Each end in diagram units: (x, y, way) for the start and the end.
-        let ends: Vec<(End, End)> = diagram
-            .links
-            .iter()
-            .map(|link| {
-                let (from, to) = (&diagram.tables[link.from], &diagram.tables[link.to]);
-                let from_y = from.row_middle(link.from_row);
-                let to_y = to.row_middle(link.to_row);
-                let (from_x, to_x, start_way, end_way) = if link.from == link.to {
-                    // A table pointing at itself: a loop off its right edge.
-                    (from.x + BOX_WIDTH, from.x + BOX_WIDTH, 1.0, 1.0)
-                } else if from.x + BOX_WIDTH / 2.0 >= to.x + BOX_WIDTH / 2.0 {
-                    // Leave from whichever side faces the other box.
-                    (from.x, to.x + BOX_WIDTH, -1.0, 1.0)
-                } else {
-                    (from.x + BOX_WIDTH, to.x, 1.0, -1.0)
-                };
-                ((from_x, from_y, start_way), (to_x, to_y, end_way))
-            })
-            .collect();
-        let spread = spread_shared_ends(&ends);
-        let lines: Vec<Line> = diagram
-            .links
-            .iter()
-            .zip(&ends)
-            .zip(spread)
-            .map(
-                |((link, &(start, end)), (start_shift, end_shift, start_half, end_half))| Line {
-                    start: place(start.0, start.1 + start_shift),
-                    end: place(end.0, end.1 + end_shift),
-                    start_way: start.2,
-                    end_way: end.2,
-                    start_half: start_half * zoom,
-                    end_half: end_half * zoom,
-                    highlighted: view.hovered.is_some_and(|h| h == link.from || h == link.to),
-                    one_to_one: link.one_to_one,
-                    optional: link.optional,
-                },
-            )
-            .collect();
+        let lines = view.lines(diagram);
         let (line, accent, paper) = (
             Hsla::from(t.border_strong),
             Hsla::from(t.accent),
@@ -516,16 +602,13 @@ impl Workspace {
                     for l in lines.iter().filter(|l| l.highlighted == pass) {
                         let color = if l.highlighted { accent } else { line };
                         let (start, end) = (l.start, l.end);
-                        let reach = match start.x == end.x {
-                            true => 60.0 * zoom,
-                            false => ((end.x - start.x).abs() / 2.0).max(40.0 * zoom),
-                        };
+                        let [_, out, back, _] = l.curve(zoom);
                         let mut path = PathBuilder::stroke(px(stroke));
                         path.move_to(at(start.x, start.y));
                         path.cubic_bezier_to(
                             at(end.x, end.y),
-                            at(start.x + l.start_way * reach, start.y),
-                            at(end.x + l.end_way * reach, end.y),
+                            at(out.x, out.y),
+                            at(back.x, back.y),
                         );
                         if let Ok(path) = path.build() {
                             window.paint_path(path, color);
@@ -637,10 +720,10 @@ impl Workspace {
                 .text_size(text(layout::TEXT_SM))
                 .bg(t.panel)
                 .border_1()
-                .border_color(if hovered {
-                    t.accent.into()
-                } else {
-                    Hsla::from(t.border)
+                .border_color(match (hovered, table.is_view()) {
+                    (true, _) => Hsla::from(t.accent),
+                    (false, true) => Hsla::from(VIEW_COLOR.swatch()),
+                    (false, false) => Hsla::from(t.border),
                 })
                 .rounded(px(layout::RADIUS_CONTROL * zoom))
                 .overflow_hidden()
@@ -663,14 +746,21 @@ impl Workspace {
                         .gap(px(6.0 * zoom))
                         .h(px(HEADER_HEIGHT * zoom))
                         .px(px(8.0 * zoom))
-                        .bg(t.surface)
+                        .bg(match table.is_view() {
+                            true => Hsla::from(VIEW_COLOR.band(t)),
+                            false => Hsla::from(t.surface),
+                        })
                         .border_b_1()
                         .border_color(t.border)
                         .cursor_grab()
                         .child(
-                            icon(icon::TABLE)
-                                .size(px(12.0 * zoom))
-                                .text_color(t.text_muted),
+                            icon(match table.kind {
+                                RelationKind::View => icon::VIEW,
+                                RelationKind::MaterializedView => icon::MATERIALIZED_VIEW,
+                                _ => icon::TABLE,
+                            })
+                            .size(px(12.0 * zoom))
+                            .text_color(t.text_muted),
                         )
                         .child(
                             div()
@@ -739,6 +829,25 @@ impl Workspace {
                     return;
                 };
                 let Some(gesture) = view.gesture.as_mut() else {
+                    // No gesture: the pointer is only looking. Pick the line
+                    // it is on, unless it is over a box, which wins.
+                    let pointer = view.on_surface(event.position);
+                    let picked = match (&view.state, view.hovered) {
+                        (DiagramState::Loaded(diagram), None) => view
+                            .lines(diagram)
+                            .iter()
+                            .map(|line| (line.link, line.distance(view.zoom, pointer)))
+                            .filter(|&(_, distance)| distance <= LINE_PICK)
+                            .min_by(|a, b| a.1.total_cmp(&b.1))
+                            .map(|(link, _)| link),
+                        _ => None,
+                    };
+                    let moved_label = picked.is_some();
+                    view.pointer = pointer;
+                    if picked != view.hovered_link || moved_label {
+                        view.hovered_link = picked;
+                        cx.notify();
+                    }
                     return;
                 };
                 // A button let go outside the window never sent its up.
@@ -833,6 +942,39 @@ impl Workspace {
             }))
             .child(links)
             .children(boxes)
+            .children(view.hovered_link.map(|index| {
+                let link = diagram.links[index];
+                let (from, to) = (&diagram.tables[link.from], &diagram.tables[link.to]);
+                let kind = match (link.one_to_one, link.optional) {
+                    (true, true) => tr("1:1, optional"),
+                    (true, false) => tr("1:1, required"),
+                    (false, true) => tr("N:1, optional"),
+                    (false, false) => tr("N:1, required"),
+                };
+                div()
+                    .absolute()
+                    .left(px(view.pointer.x + 14.0))
+                    .top(px(view.pointer.y + 14.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .px(px(layout::SPACE_SM))
+                    .py(px(layout::SPACE_XS))
+                    .bg(t.overlay)
+                    .border_1()
+                    .border_color(t.border_strong)
+                    .rounded(px(layout::RADIUS_CONTROL))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .whitespace_nowrap()
+                    .child(div().text_color(t.text).child(format!(
+                        "{}.{} → {}.{}",
+                        from.name,
+                        from.fields[link.from_row].name,
+                        to.name,
+                        to.fields[link.to_row].name
+                    )))
+                    .child(div().text_color(t.text_faint).child(kind))
+            }))
             .into_any_element()
     }
 }
@@ -883,21 +1025,21 @@ fn spread_shared_ends(ends: &[(End, End)]) -> Vec<Spread> {
     out
 }
 
-/// The relations a diagram draws: tables, not views, and not the partitions
-/// of a partitioned table, which would draw its one shape once per partition.
-fn diagram_tables(schema: &crate::db::Schema) -> Vec<String> {
-    let mut names: Vec<String> = schema
+/// The relations a diagram draws: tables and views, not the partitions of a
+/// partitioned table, which would draw its one shape once per partition.
+/// Tables first, so when [`diagram::MAX_TABLES`] cuts, views go first.
+fn diagram_tables(schema: &crate::db::Schema) -> Vec<(String, RelationKind)> {
+    let mut names: Vec<(String, RelationKind)> = schema
         .relations
         .iter()
         .filter(|relation| {
-            matches!(
-                relation.kind,
-                RelationKind::Table | RelationKind::PartitionedTable
-            ) && relation.partition_of.is_none()
+            !matches!(relation.kind, RelationKind::ForeignTable) && relation.partition_of.is_none()
         })
-        .map(|relation| relation.name.clone())
+        .map(|relation| (relation.name.clone(), relation.kind))
         .collect();
-    names.sort();
+    let is_view =
+        |kind: RelationKind| matches!(kind, RelationKind::View | RelationKind::MaterializedView);
+    names.sort_by(|a, b| (is_view(a.1), &a.0).cmp(&(is_view(b.1), &b.0)));
     names
 }
 

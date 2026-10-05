@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::db::{Connection, DbError, Structure};
+use crate::db::{Connection, DbError, RelationKind, Structure};
 
 pub(crate) const BOX_WIDTH: f32 = 240.0;
 pub(crate) const HEADER_HEIGHT: f32 = 30.0;
@@ -42,6 +42,7 @@ pub(crate) struct Diagram {
 #[derive(Clone, Debug)]
 pub(crate) struct Table {
     pub(crate) name: String,
+    pub(crate) kind: RelationKind,
     pub(crate) fields: Vec<Field>,
     pub(crate) x: f32,
     pub(crate) y: f32,
@@ -72,6 +73,13 @@ pub(crate) struct Link {
 }
 
 impl Table {
+    pub(crate) fn is_view(&self) -> bool {
+        matches!(
+            self.kind,
+            RelationKind::View | RelationKind::MaterializedView
+        )
+    }
+
     /// The columns the box draws; the rest are counted in its last row.
     pub(crate) fn shown(&self) -> &[Field] {
         &self.fields[..self.fields.len().min(MAX_ROWS)]
@@ -178,7 +186,7 @@ fn mermaid_word(text: &str) -> String {
 pub(crate) fn load(
     connection: &Connection,
     schema: &str,
-    mut names: Vec<String>,
+    mut names: Vec<(String, RelationKind)>,
 ) -> Result<Diagram, DbError> {
     let left_out = names.len().saturating_sub(MAX_TABLES);
     names.truncate(MAX_TABLES);
@@ -186,9 +194,9 @@ pub(crate) fn load(
     let mut read = Vec::with_capacity(names.len());
     let mut first_error = None;
     let mut unreadable = 0;
-    for name in names {
+    for (name, kind) in names {
         match connection.structure(schema, &name) {
-            Ok(structure) => read.push((name, structure)),
+            Ok(structure) => read.push((name, kind, structure)),
             Err(error) => {
                 unreadable += 1;
                 first_error.get_or_insert(error);
@@ -210,15 +218,15 @@ pub(crate) fn load(
 }
 
 /// The boxes and lines, before anything has a position.
-fn assemble(schema: &str, read: Vec<(String, Structure)>) -> Diagram {
+fn assemble(schema: &str, read: Vec<(String, RelationKind, Structure)>) -> Diagram {
     let index: HashMap<&str, usize> = read
         .iter()
         .enumerate()
-        .map(|(position, (name, _))| (name.as_str(), position))
+        .map(|(position, (name, _, _))| (name.as_str(), position))
         .collect();
 
     let mut links = Vec::new();
-    for (from, (_, structure)) in read.iter().enumerate() {
+    for (from, (_, _, structure)) in read.iter().enumerate() {
         for key in &structure.foreign_keys {
             // A key into another schema has no box here to land on.
             if key.referenced_schema != schema {
@@ -232,7 +240,7 @@ fn assemble(schema: &str, read: Vec<(String, Structure)>) -> Diagram {
             };
             let (Some(from_row), Some(to_row)) = (
                 row_of(structure, &key.column),
-                row_of(&read[to].1, &key.referenced_column),
+                row_of(&read[to].2, &key.referenced_column),
             ) else {
                 continue;
             };
@@ -249,7 +257,7 @@ fn assemble(schema: &str, read: Vec<(String, Structure)>) -> Diagram {
 
     let tables = read
         .into_iter()
-        .map(|(name, structure)| {
+        .map(|(name, kind, structure)| {
             let primary = structure.primary_key();
             let fields: Vec<Field> = structure
                 .columns
@@ -267,6 +275,7 @@ fn assemble(schema: &str, read: Vec<(String, Structure)>) -> Diagram {
                 .collect();
             Table {
                 name,
+                kind,
                 fields,
                 x: 0.0,
                 y: 0.0,
@@ -319,7 +328,8 @@ fn unique_alone(structure: &Structure, column: &str) -> bool {
 /// of what they point at (the barycenter heuristic), which untangles most of
 /// the crossings for none of the cost of minimising them.
 ///
-/// Tables with no line to anything go last, in name order, out of the way.
+/// Tables with no line to anything go last, in name order, out of the way,
+/// and views after them.
 fn lay_out(diagram: &mut Diagram) {
     let count = diagram.tables.len();
     if count == 0 {
@@ -401,7 +411,11 @@ fn lay_out(diagram: &mut Diagram) {
     }
 
     let mut loose: Vec<usize> = (0..count).filter(|&t| !connected[t]).collect();
-    loose.sort_by(|&a, &b| diagram.tables[a].name.cmp(&diagram.tables[b].name));
+    // Views last, after the loose tables, so they gather in their own columns.
+    loose.sort_by(|&a, &b| {
+        let (a, b) = (&diagram.tables[a], &diagram.tables[b]);
+        (a.is_view(), &a.name).cmp(&(b.is_view(), &b.name))
+    });
     if !loose.is_empty() {
         order.push(loose);
     }
