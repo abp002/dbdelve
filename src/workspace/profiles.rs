@@ -50,6 +50,7 @@ impl Workspace {
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
             language: self.settings.language.clone(),
+            client_sort: Some(self.settings.client_sort),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -169,6 +170,7 @@ impl Workspace {
             stored.next_query_id.unwrap_or(0),
             stored.open_objects,
             config.engine(),
+            Sorting::new(self.settings.client_sort),
             window,
             cx,
         );
@@ -242,6 +244,7 @@ impl Workspace {
             0,
             Vec::new(),
             config.engine(),
+            Sorting::new(self.settings.client_sort),
             window,
             cx,
         );

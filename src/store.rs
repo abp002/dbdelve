@@ -248,6 +248,12 @@ pub struct StoredGrid {
     /// different order than the snapshot it replaces.
     #[serde(default)]
     pub order_by: Vec<(String, bool)>,
+    /// A view sorted in memory: its keys as expression and direction, `[]`
+    /// for one with nothing sorted yet. Absent for a view the server sorts.
+    /// Kept apart from [`Self::order_by`], which rebuilds the statement: an
+    /// in-memory sort must never reach the server unasked.
+    #[serde(default)]
+    pub client_sort: Option<Vec<(String, bool)>>,
     #[serde(default)]
     pub widths: Vec<f32>,
     #[serde(default)]
@@ -321,6 +327,8 @@ pub struct StoredSettings {
     /// An `i18n::LANGUAGES` code; none follows the system.
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub client_sort: Option<bool>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -746,6 +754,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             total_rows: grid.total_rows,
             sort: grid.sort.clone(),
             order_by: grid.order_by.clone(),
+            client_sort: grid.client_sort.clone(),
             widths: grid.widths.clone(),
             active: grid.active,
             last_query: grid.last_query.clone(),
@@ -1801,6 +1810,7 @@ open_objects = []
                 check_for_updates: Some(false),
                 color_titlebar: Some(false),
                 language: Some("es".into()),
+                client_sort: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -2285,6 +2295,7 @@ open_objects = []
                 total_rows: 1,
                 sort: Vec::new(),
                 order_by: Vec::new(),
+                client_sort: None,
                 widths: Vec::new(),
                 active: None,
                 last_query: None,
@@ -2332,6 +2343,7 @@ open_objects = []
                 total_rows: 1,
                 sort: vec![(0, true)],
                 order_by: vec![("created_at".into(), false)],
+                client_sort: Some(vec![("\"name\"".into(), false)]),
                 widths: vec![80.0, 160.0],
                 active: Some((0, 1)),
                 last_query: Some("select * from accounts".into()),
@@ -2366,6 +2378,7 @@ open_objects = []
                 total_rows: GRID_ROW_CAP + 10,
                 sort: Vec::new(),
                 order_by: Vec::new(),
+                client_sort: Some(Vec::new()),
                 widths: Vec::new(),
                 active: None,
                 last_query: None,
@@ -2382,6 +2395,7 @@ open_objects = []
             let read_back = read_grid("dev", &big_key).expect("the capped grid must read back");
             assert_eq!(read_back.rows.len(), GRID_ROW_CAP);
             assert_eq!(read_back.total_rows, GRID_ROW_CAP + 10);
+            assert_eq!(read_back.client_sort, Some(Vec::new()));
             assert_eq!(
                 oversized.rows.len(),
                 GRID_ROW_CAP + 10,
@@ -2413,6 +2427,7 @@ open_objects = []
                 total_rows: 1,
                 sort: Vec::new(),
                 order_by: vec![("\"id\"".into(), true)],
+                client_sort: None,
                 widths: Vec::new(),
                 active: None,
                 last_query: None,

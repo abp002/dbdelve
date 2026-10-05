@@ -53,6 +53,10 @@ pub(crate) struct Settings {
     /// An `i18n::LANGUAGES` code, or none to follow the system. Read by
     /// `i18n::init` at launch, so a change shows on the next one.
     pub(crate) language: Option<String>,
+    /// Whether a new tab sorts on a header click by reordering the rows it
+    /// holds rather than by asking the server again. Off by default, which is
+    /// how every tab sorted before this was a choice.
+    pub(crate) client_sort: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -80,6 +84,7 @@ impl Default for Settings {
             check_for_updates: true,
             color_titlebar: true,
             language: None,
+            client_sort: false,
             custom_keybindings: HashMap::new(),
         }
     }
@@ -376,6 +381,7 @@ impl Workspace {
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.language = stored_settings.language.clone();
+                workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -793,6 +799,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The sorting a new tab starts with. Not applied to the tabs already
+    /// open, for the reason `set_preview_rows` is not: each holds its own.
+    pub(crate) fn set_client_sort(&mut self, client: bool, cx: &mut Context<Self>) {
+        if self.settings.client_sort == client {
+            return;
+        }
+        self.settings.client_sort = client;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
     /// Written through for the same reason the zoom is: a font that resets on
     /// relaunch is a setting the user has to make again every morning.
     pub(crate) fn set_font(&mut self, slot: FontSlot, family: String, cx: &mut Context<Self>) {
@@ -1114,6 +1131,7 @@ impl Render for Workspace {
                     .is_some_and(|sql| sql::rerunnable(profile.config.engine(), sql))
             });
         let paging = views::render_paging(profile, cx);
+        let view_sorting = views::render_view_sorting(profile, cx);
         let relation = profile
             .session
             .active_object()
@@ -1310,6 +1328,7 @@ impl Render for Workspace {
             || count_control.is_some()
             || notice.is_some()
             || paging.is_some()
+            || view_sorting.is_some()
             || query_status.is_some()
             || refreshable_snapshot
             || has_results
@@ -1336,6 +1355,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .gap(px(layout::SPACE_SM))
+                        .children(view_sorting)
                         .children(left_stats.map(|stats| {
                             div()
                                 .flex_shrink_0()
