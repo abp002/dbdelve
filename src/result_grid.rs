@@ -17,6 +17,7 @@ use crate::{
     ShowReferences, Workspace,
     db::{self, EditTarget, QueryResult},
     export::{self, RowsAs},
+    i18n::tr,
     icons::icon,
     sql::Mode,
     store::{GRID_ROW_CAP, StoredGrid, captured_at},
@@ -1659,11 +1660,11 @@ impl TableDelegate for ResultGrid {
             false => Vec::new(),
             true => [
                 self.offers_null(col)
-                    .then(|| ("Set Value to NULL", Box::new(crate::SetNull) as _)),
+                    .then(|| (tr("Set Value to NULL"), Box::new(crate::SetNull) as _)),
                 self.offers_empty(col)
-                    .then(|| ("Set Value to Empty", Box::new(crate::SetEmpty) as _)),
+                    .then(|| (tr("Set Value to Empty"), Box::new(crate::SetEmpty) as _)),
                 self.offers_default(col)
-                    .then(|| ("Set Value to Default", Box::new(crate::SetDefault) as _)),
+                    .then(|| (tr("Set Value to Default"), Box::new(crate::SetDefault) as _)),
             ]
             .into_iter()
             .flatten()
@@ -1693,12 +1694,12 @@ impl TableDelegate for ResultGrid {
         // submenu's own "Text" entry already puts the same TSV on the
         // clipboard.
         let rows_as_label = match self.selected_row_indices().len() {
-            1 => "Copy Row As",
-            _ => "Copy Rows As",
+            1 => tr("Copy Row As"),
+            _ => tr("Copy Rows As"),
         };
         let menu = menu
             .when_some(self.focus.clone(), PopupMenu::action_context)
-            .menu("Copy Cell", Box::new(crate::CopyCell))
+            .menu(tr("Copy Cell"), Box::new(crate::CopyCell))
             .item(PopupMenuItem::submenu(rows_as_label, rows_as))
             .when(!stages.is_empty(), PopupMenu::separator);
         stages

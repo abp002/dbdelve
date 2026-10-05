@@ -9,6 +9,7 @@ use gpui_component::menu::PopupMenuItem;
 use super::*;
 use crate::connection_form::ConnectionTest;
 use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
+use crate::i18n::{tr, trf};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
 
@@ -38,7 +39,7 @@ impl Workspace {
                         .text_size(px(layout::chrome(layout::TEXT_SM)))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.text_muted)
-                        .child(label),
+                        .child(tr(label)),
                 )
                 .child(control)
         };
@@ -85,9 +86,9 @@ impl Workspace {
                                             .text_size(px(layout::chrome(layout::TEXT_LG)))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(if editing {
-                                                "Edit connection"
+                                                tr("Edit connection")
                                             } else {
-                                                "Connect to a database"
+                                                tr("Connect to a database")
                                             }),
                                     )
                                     // Snowflake has no connection URL to paste,
@@ -101,9 +102,9 @@ impl Workspace {
                                                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                                                     .text_color(t.text_muted)
                                                     .child(if editing {
-                                                        "Change where this connection points."
+                                                        tr("Change where this connection points.")
                                                     } else {
-                                                        "Paste a URL, or fill in the fields."
+                                                        tr("Paste a URL, or fill in the fields.")
                                                     })
                                             },
                                         ),
@@ -144,7 +145,7 @@ impl Workspace {
                                             .text_size(px(layout::chrome(layout::TEXT_SM)))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(t.text_muted)
-                                            .child("Connection URL"),
+                                            .child(tr("Connection URL")),
                                     )
                                     .child(
                                         div()
@@ -164,7 +165,7 @@ impl Workspace {
                                                     Control::Standard,
                                                     t,
                                                 )
-                                                .tooltip("Fill the fields from this URL")
+                                                .tooltip(tr("Fill the fields from this URL"))
                                                 .on_click(cx.listener(Self::apply_connection_url)),
                                             ),
                                     ),
@@ -179,7 +180,7 @@ impl Workspace {
                                         div()
                                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .text_color(t.text_faint)
-                                            .child("OR"),
+                                            .child(tr("OR")),
                                     )
                                     .child(hairline()),
                             )
@@ -239,7 +240,7 @@ impl Workspace {
                                 Checkbox::new("srv-host")
                                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .label("Host is an SRV name (mongodb+srv)")
+                                    .label(tr("Host is an SRV name (mongodb+srv)"))
                                     .checked(form.srv)
                                     .on_click(cx.listener(|workspace, on: &bool, _, cx| {
                                         if let Some(form) = &mut workspace.form {
@@ -271,7 +272,7 @@ impl Workspace {
                                             .text_size(px(layout::chrome(layout::TEXT_SM)))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(t.text_muted)
-                                            .child("Encryption"),
+                                            .child(tr("Encryption")),
                                     )
                                     .child(div().flex().gap(px(layout::SPACE_XS)).children(
                                         SslMode::ALL.map(|mode| self.sslmode_chip(mode, cx)),
@@ -283,7 +284,7 @@ impl Workspace {
                                         div()
                                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .text_color(t.text_faint)
-                                            .child(form.sslmode.explanation()),
+                                            .child(tr(form.sslmode.explanation())),
                                     ),
                             )
                             // Only where it is consulted: on `require` a
@@ -296,7 +297,7 @@ impl Workspace {
                                 Checkbox::new("ssh-tunnel")
                                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .label("Connect through an SSH tunnel")
+                                    .label(tr("Connect through an SSH tunnel"))
                                     .checked(form.ssh)
                                     .on_click(cx.listener(|workspace, on: &bool, _, cx| {
                                         if let Some(form) = &mut workspace.form {
@@ -323,8 +324,7 @@ impl Workspace {
                                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .text_color(t.text_faint)
                                             .child(
-                                                "Host and Port are as the SSH host sees them: \
-                                                 localhost is the SSH host itself.",
+                                                tr("Host and Port are as the SSH host sees them: localhost is the SSH host itself."),
                                             ),
                                     )
                                     .child(
@@ -364,10 +364,10 @@ impl Workspace {
                     .children(form.test.as_ref().map(|test| {
                         let (color, text) = match test {
                             ConnectionTest::Running(_) => {
-                                (t.text_muted, "Testing connection…".to_string())
+                                (t.text_muted, tr("Testing connection…").to_string())
                             }
                             ConnectionTest::Passed => {
-                                (t.success, "Connection succeeded.".to_string())
+                                (t.success, tr("Connection succeeded.").to_string())
                             }
                             ConnectionTest::Failed(message) => (t.danger, message.clone()),
                         };
@@ -381,7 +381,7 @@ impl Workspace {
                             .flex()
                             .gap(px(layout::SPACE_SM))
                             .child(
-                                button("cancel", "Cancel", Tone::Quiet, Control::Standard, t)
+                                button("cancel", tr("Cancel"), Tone::Quiet, Control::Standard, t)
                                     .flex_1()
                                     .on_click(cx.listener(|workspace, _, window, cx| {
                                         workspace.show_editor(&ShowEditor, window, cx);
@@ -390,7 +390,7 @@ impl Workspace {
                             .child(
                                 button(
                                     "test-connection",
-                                    "Test",
+                                    tr("Test"),
                                     Tone::Quiet,
                                     Control::Standard,
                                     t,
@@ -401,7 +401,7 @@ impl Workspace {
                             .child(
                                 button(
                                     "connect",
-                                    if editing { "Save" } else { "Connect" },
+                                    if editing { tr("Save") } else { tr("Connect") },
                                     Tone::Primary,
                                     Control::Standard,
                                     t,
@@ -479,8 +479,8 @@ impl Workspace {
                 tile(
                     "welcome-new-project",
                     icon::ADD_TO_PROJECT,
-                    "New project",
-                    "Group connections that belong together.".into(),
+                    tr("New project"),
+                    tr("Group connections that belong together.").into(),
                     ui::chord_hint("new_project", overrides),
                 )
                 .on_click(move |_, window, cx| {
@@ -493,7 +493,7 @@ impl Workspace {
                 tile(
                     "welcome-new-connection",
                     icon::PLUS,
-                    "New connection",
+                    tr("New connection"),
                     Engine::ALL.map(Engine::label).join(", "),
                     ui::chord_hint("new_connection", overrides),
                 )
@@ -520,7 +520,7 @@ impl Workspace {
                                 div()
                                     .text_size(px(layout::chrome(layout::TEXT_XS)))
                                     .text_color(t.text_faint)
-                                    .child("OR IMPORT FROM"),
+                                    .child(tr("OR IMPORT FROM")),
                             )
                             .child(hairline()),
                     )
@@ -558,7 +558,7 @@ impl Workspace {
                     .child(
                         button(
                             "create-project",
-                            "Create",
+                            tr("Create"),
                             Tone::Primary,
                             Control::Standard,
                             t,
@@ -578,7 +578,7 @@ impl Workspace {
                             Control::Standard,
                             t,
                         )
-                        .tooltip("Cancel")
+                        .tooltip(tr("Cancel"))
                         .on_click(cx.listener(|workspace, _, _, cx| {
                             workspace.drop_project_name();
                             cx.notify();
@@ -626,13 +626,13 @@ impl Workspace {
                             .whitespace_nowrap()
                             .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.text_faint)
-                            .child("No connections yet"),
+                            .child(tr("No connections yet")),
                     )
                     .child(self.project_actions(index, &project.name, cx))
                     .child(
                         button(
                             ("welcome-add-connection", index),
-                            "Add connection",
+                            tr("Add connection"),
                             Tone::Quiet,
                             Control::Compact,
                             t,
@@ -690,16 +690,14 @@ impl Workspace {
                                         div()
                                             .text_size(px(layout::chrome(layout::TEXT_LG)))
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Welcome to DBDelve"),
+                                            .child(tr("Welcome to DBDelve")),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(layout::chrome(layout::TEXT_SM)))
                                             .text_color(t.text_muted)
                                             .child(
-                                                "Start with a project to organize your \
-                                                 connections, or connect straight to a \
-                                                 database.",
+                                                tr("Start with a project to organize your connections, or connect straight to a database."),
                                             ),
                                     ),
                             ),
@@ -728,7 +726,7 @@ impl Workspace {
                                     div()
                                         .px(px(layout::SPACE_SM))
                                         .py(px(layout::SPACE_XS))
-                                        .child(section_label(t, "Projects")),
+                                        .child(section_label(t, tr("Projects"))),
                                 )
                                 .children(projects),
                         )
@@ -747,7 +745,7 @@ impl Workspace {
             .iter()
             .map(|project| project.name.clone())
             .collect::<Vec<_>>();
-        let suggested = format!("Imported from {source}");
+        let suggested = trf!("Imported from {}", source);
         let mut groups = Vec::new();
         if !known.contains(&suggested) {
             groups.push(vec![Some(suggested)]);
@@ -768,8 +766,8 @@ impl Workspace {
             pending.project.clone(),
             groups,
             move |project| match project {
-                None => "No project".into(),
-                Some(name) if new(project) => format!("{name} (new project)").into(),
+                None => tr("No project").into(),
+                Some(name) if new(project) => trf!("{} (new project)", name).into(),
                 Some(name) => name.clone().into(),
             },
             move |project| {
@@ -788,10 +786,11 @@ impl Workspace {
             cx,
         );
         let count = pending.fresh;
-        let heading = format!(
-            "Import {count} connection{} from {source}",
-            if count == 1 { "" } else { "s" }
-        );
+        let heading = if count == 1 {
+            trf!("Import {} connection from {}", count, source)
+        } else {
+            trf!("Import {} connections from {}", count, source)
+        };
 
         Some(
             div()
@@ -808,7 +807,7 @@ impl Workspace {
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
-                                .child("Choose the project they join."),
+                                .child(tr("Choose the project they join.")),
                         )
                         .child(self.labelled_field("Project", picker, cx))
                         .child(
@@ -819,7 +818,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "cancel-import",
-                                        "Cancel",
+                                        tr("Cancel"),
                                         Tone::Quiet,
                                         Control::Standard,
                                         t,
@@ -834,7 +833,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "confirm-import",
-                                        "Import",
+                                        tr("Import"),
                                         Tone::Primary,
                                         Control::Standard,
                                         t,
@@ -875,7 +874,7 @@ impl Workspace {
                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme(cx).text_muted)
-                    .child(label),
+                    .child(tr(label)),
             )
             .child(control)
     }
@@ -955,7 +954,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .text_color(t.danger)
-                                    .child(format!("Could not check: {message}")),
+                                    .child(trf!("Could not check: {}", message)),
                             )
                             .into_any_element();
                     }
@@ -1027,7 +1026,7 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Close tab"))
+                        .child(section_label(t, tr("Close tab")))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
@@ -1036,8 +1035,7 @@ impl Workspace {
                                 // and never written to them, so closing the
                                 // tab is the moment they stop existing.
                                 .child(
-                                    "This tab has cell edits that have not been applied. \
-                                     Closing it discards them.",
+                                    tr("This tab has cell edits that have not been applied. Closing it discards them."),
                                 ),
                         )
                         .child(
@@ -1048,7 +1046,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "cancel-discard-close",
-                                        "Cancel",
+                                        tr("Cancel"),
                                         Tone::Quiet,
                                         Control::Standard,
                                         t,
@@ -1064,7 +1062,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "confirm-discard-close",
-                                        "Discard",
+                                        tr("Discard"),
                                         Tone::Danger,
                                         Control::Standard,
                                         t,
@@ -1101,7 +1099,7 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Close query"))
+                        .child(section_label(t, tr("Close query")))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
@@ -1109,8 +1107,9 @@ impl Workspace {
                                 // The whole point of the dialog: a saved query
                                 // is listed while its file exists, so closing
                                 // its tab and deleting it are one act.
-                                .child(format!(
-                                    "{name} is a saved query. Closing its tab deletes it."
+                                .child(trf!(
+                                    "{} is a saved query. Closing its tab deletes it.",
+                                    name
                                 )),
                         )
                         .child(
@@ -1121,7 +1120,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "cancel-close-tab",
-                                        "Cancel",
+                                        tr("Cancel"),
                                         Tone::Quiet,
                                         Control::Standard,
                                         t,
@@ -1137,7 +1136,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "confirm-close-tab",
-                                        "Delete",
+                                        tr("Delete"),
                                         Tone::Danger,
                                         Control::Standard,
                                         t,
@@ -1173,13 +1172,13 @@ impl Workspace {
         // upgrade arm changes the mode itself, mid-prompt).
         let stop = sql::gate(&pending.verdict, profile.mode, &profile.confirmed)?;
         let name = profile.name.clone();
-        let current_mode = profile.mode.label();
+        let current_mode = tr(profile.mode.label());
         let sql = pending.resume.as_ref().map(|resume| resume.sql.clone());
         let dont_ask = pending.dont_ask;
 
         let (title, message, confirm, tone) = match stop {
             Stop::Upgrade(needed) => (
-                "Mode",
+                tr("Mode"),
                 // `Destructive::Unreadable` only reaches `Upgrade` on an engine
                 // with no server-side read-only setting to fall back on
                 // (`Engine::holds_read_only`): there is nothing stopping a
@@ -1190,37 +1189,38 @@ impl Workspace {
                     .destructive
                     .contains(&Destructive::Unreadable)
                 {
-                    format!(
-                        "{name} is in {current_mode} mode. dbdelve can't parse this, and \
-                         this database has no server-side read-only setting to stop it if \
-                         it writes, so it needs {}.",
-                        needed.label()
+                    trf!(
+                        "{} is in {} mode. dbdelve can't parse this, and this database has no server-side read-only setting to stop it if it writes, so it needs {}.",
+                        name,
+                        current_mode,
+                        tr(needed.label())
                     )
                 } else {
-                    format!(
-                        "{name} is in {current_mode} mode. This needs {}.",
-                        needed.label()
+                    trf!(
+                        "{} is in {} mode. This needs {}.",
+                        name,
+                        current_mode,
+                        tr(needed.label())
                     )
                 },
                 if sql.is_some() {
-                    format!("Switch to {} and run", needed.label())
+                    trf!("Switch to {} and run", tr(needed.label()))
                 } else {
-                    format!("Switch to {}", needed.label())
+                    trf!("Switch to {}", tr(needed.label()))
                 },
                 Tone::Primary,
             ),
             Stop::Confirm(kind) => (
-                "Confirm",
-                format!("This is a {}. It cannot be undone.", kind.label()),
-                "Run".to_string(),
+                tr("Confirm"),
+                trf!("This is a {}. It cannot be undone.", tr(kind.label())),
+                tr("Run").to_string(),
                 Tone::Danger,
             ),
             Stop::RunOnce => (
-                "Unreadable statement",
-                "dbdelve can't parse this, so it can't tell what it does or whether \
-                 this connection's mode covers it."
+                tr("Unreadable statement"),
+                tr("dbdelve can't parse this, so it can't tell what it does or whether this connection's mode covers it.")
                     .to_string(),
-                "Run once".to_string(),
+                tr("Run once").to_string(),
                 Tone::Danger,
             ),
         };
@@ -1267,9 +1267,10 @@ impl Workspace {
                                 Checkbox::new("dont-ask-again")
                                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                                     .font_weight(FontWeight::BOLD)
-                                    .label(format!(
-                                        "Don't ask again for {} on {name}",
-                                        kind.label()
+                                    .label(trf!(
+                                        "Don't ask again for {} on {}",
+                                        tr(kind.label()),
+                                        name
                                     ))
                                     .checked(dont_ask)
                                     .on_click(move |_, _, cx| {
@@ -1288,7 +1289,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "cancel-pending-run",
-                                        "Cancel",
+                                        tr("Cancel"),
                                         Tone::Quiet,
                                         Control::Standard,
                                         t,
@@ -1339,17 +1340,24 @@ impl Workspace {
         // The buffer may have been typed in since the run started, so this
         // is the line the statement ran from, in the text it ran from.
         let line = queue.sql.get(..failed.start)?.matches('\n').count() + 1;
-        let message = format!(
-            "Statement {} of the selection, at line {line}, {}, failed: {} {} {} not run.",
-            queue.done.len(),
-            crate::session::query_label(&failed.sql),
-            error.message,
-            queue.remaining.len(),
-            match queue.remaining.len() {
-                1 => "statement after it has",
-                _ => "statements after it have",
-            },
-        );
+        let message = match queue.remaining.len() {
+            1 => trf!(
+                "Statement {} of the selection, at line {}, {}, failed: {} {} statement after it has not run.",
+                queue.done.len(),
+                line,
+                crate::session::query_label(&failed.sql),
+                error.message,
+                queue.remaining.len(),
+            ),
+            _ => trf!(
+                "Statement {} of the selection, at line {}, {}, failed: {} {} statements after it have not run.",
+                queue.done.len(),
+                line,
+                crate::session::query_label(&failed.sql),
+                error.message,
+                queue.remaining.len(),
+            ),
+        };
 
         let stop = cx.entity().downgrade();
         let carry_on = stop.clone();
@@ -1364,7 +1372,7 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Run stopped"))
+                        .child(section_label(t, tr("Run stopped")))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
@@ -1376,9 +1384,7 @@ impl Workspace {
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(
-                                    "Stop leaves the results so far on screen and sends none of \
-                                     the rest. Continue sends the statement after the one that \
-                                     failed.",
+                                    tr("Stop leaves the results so far on screen and sends none of the rest. Continue sends the statement after the one that failed."),
                                 ),
                         )
                         .child(
@@ -1387,7 +1393,7 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button("stop-queue", "Stop", Tone::Quiet, Control::Standard, t)
+                                    button("stop-queue", tr("Stop"), Tone::Quiet, Control::Standard, t)
                                         .on_click(move |_, _, cx| {
                                             _ = stop.update(cx, |workspace, cx| {
                                                 workspace.stop_queue(cx);
@@ -1397,7 +1403,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "continue-queue",
-                                        "Continue",
+                                        tr("Continue"),
                                         Tone::Primary,
                                         Control::Standard,
                                         t,
@@ -1429,7 +1435,7 @@ impl Workspace {
             .active_results()
             .and_then(|results| results.read(cx).delegate().captured())
             .map(|captured| relative_age(store::captured_at().saturating_sub(captured)))
-            .unwrap_or_else(|| "moments".into());
+            .unwrap_or_else(|| tr("moments").into());
         // What Refresh sends, shown for the same reason the mode prompt shows
         // its statement. Only a buffer's: a relation's is dbdelve's own
         // preview of the table.
@@ -1456,8 +1462,8 @@ impl Workspace {
                         .child(section_label(
                             t,
                             match editing {
-                                true => "Edit rows restored from your last session?",
-                                false => "Refresh with this query?",
+                                true => tr("Edit rows restored from your last session?"),
+                                false => tr("Refresh with this query?"),
                             },
                         ))
                         // From the status bar's Refresh, the statement alone:
@@ -1466,12 +1472,9 @@ impl Workspace {
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
-                                .child(format!(
-                                    "These rows were fetched {age} ago, before dbdelve was \
-                                     last closed, and were restored from that session rather \
-                                     than read again. Anything changed in the database since \
-                                     isn't shown here, and an edit overwrites whatever the \
-                                     cell holds now."
+                                .child(trf!(
+                                    "These rows were fetched {} ago, before dbdelve was last closed, and were restored from that session rather than read again. Anything changed in the database since isn't shown here, and an edit overwrites whatever the cell holds now.",
+                                    age
                                 ))
                         }))
                         .children(refresh_sql.map(|sql| {
@@ -1483,7 +1486,7 @@ impl Workspace {
                                     div()
                                         .text_size(px(layout::chrome(layout::TEXT_SM)))
                                         .text_color(t.text_muted)
-                                        .child("Refresh runs:")
+                                        .child(tr("Refresh runs:"))
                                 }))
                                 .child(
                                     div()
@@ -1499,7 +1502,7 @@ impl Workspace {
                             Checkbox::new("dont-ask-stale")
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .font_weight(FontWeight::BOLD)
-                                .label("Don't ask again for this connection")
+                                .label(tr("Don't ask again for this connection"))
                                 .checked(dont_ask)
                                 .on_click(move |_, _, cx| {
                                     _ = tick.update(cx, |workspace, cx| {
@@ -1515,7 +1518,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "cancel-stale-edit",
-                                        "Cancel",
+                                        tr("Cancel"),
                                         Tone::Quiet,
                                         Control::Standard,
                                         t,
@@ -1531,7 +1534,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "refresh-stale-edit",
-                                        "Refresh",
+                                        tr("Refresh"),
                                         match editing {
                                             true => Tone::Quiet,
                                             false => Tone::Primary,
@@ -1550,7 +1553,7 @@ impl Workspace {
                                 .children(editing.then(|| {
                                     button(
                                         "approve-stale-edit",
-                                        "Edit anyway",
+                                        tr("Edit anyway"),
                                         Tone::Primary,
                                         Control::Standard,
                                         t,
@@ -1611,7 +1614,7 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, review.title))
+                        .child(section_label(t, tr(review.title)))
                         .child(
                             div()
                                 .id("apply-review-sql")
@@ -1638,7 +1641,7 @@ impl Workspace {
                                 .child(
                                     button(
                                         "cancel-apply",
-                                        "Cancel",
+                                        tr("Cancel"),
                                         Tone::Quiet,
                                         Control::Standard,
                                         t,
@@ -1658,7 +1661,7 @@ impl Workspace {
                                     // bright over it.
                                     button(
                                         "run-apply",
-                                        "Run",
+                                        tr("Run"),
                                         if running { Tone::Quiet } else { Tone::Primary },
                                         Control::Standard,
                                         t,
@@ -1765,7 +1768,7 @@ impl Workspace {
                                             Control::Inline,
                                             t,
                                         )
-                                        .tooltip("Move to project")
+                                        .tooltip(tr("Move to project"))
                                         .on_click(
                                             move |_, _, cx| {
                                                 cx.stop_propagation();
@@ -1787,7 +1790,7 @@ impl Workspace {
                                             Control::Inline,
                                             t,
                                         )
-                                        .tooltip("Remove from project")
+                                        .tooltip(tr("Remove from project"))
                                         .on_click(
                                             move |_, _, cx| {
                                                 cx.stop_propagation();
@@ -1806,7 +1809,7 @@ impl Workspace {
                                         Control::Inline,
                                         t,
                                     )
-                                    .tooltip("Edit connection")
+                                    .tooltip(tr("Edit connection"))
                                     .on_click(
                                         move |_, window, cx| {
                                             // The row activates on click, and
@@ -1839,7 +1842,7 @@ impl Workspace {
                                         Control::Inline,
                                         t,
                                     )
-                                    .tooltip("Duplicate connection")
+                                    .tooltip(tr("Duplicate connection"))
                                     .on_click(
                                         move |_, window, cx| {
                                             cx.stop_propagation();
@@ -1862,13 +1865,13 @@ impl Workspace {
                                     )
                                     .when(pending, |armed| {
                                         armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
-                                            "Remove?",
+                                            tr("Remove?"),
                                             Tone::Danger,
                                             Control::Inline,
                                             t,
                                         ))
                                     })
-                                    .tooltip("Remove connection")
+                                    .tooltip(tr("Remove connection"))
                                     .on_click(
                                         move |_, _, cx| {
                                             // Likewise: activating clears
@@ -1995,7 +1998,7 @@ impl Workspace {
                         .text_color(t.text_muted)
                         .hover(|style| style.bg(t.element_hover).text_color(t.text))
                         .child(row_icon(t, icon::PLUS))
-                        .child("Add connection")
+                        .child(tr("Add connection"))
                         .on_click(move |_, window, cx| {
                             _ = add_workspace.update(cx, |workspace, cx| {
                                 let project = match workspace.expanded_groups.last() {
@@ -2010,7 +2013,7 @@ impl Workspace {
         let active_name = self
             .profile()
             .map(|profile| profile.name.clone())
-            .unwrap_or_else(|| "Connections".into());
+            .unwrap_or_else(|| tr("Connections").into());
         let active_color = self.profile().and_then(|profile| profile.color);
         let project_name = self.current_group().map(str::to_string);
         let toggle_workspace = workspace.clone();
@@ -2108,7 +2111,7 @@ impl Workspace {
             rows.push(
                 switcher_row("no-match", t)
                     .text_color(t.text_faint)
-                    .child("No matching connections")
+                    .child(tr("No matching connections"))
                     .into_any_element(),
             );
             return rows;
@@ -2118,7 +2121,7 @@ impl Workspace {
                 div()
                     .px(px(layout::SPACE_SM))
                     .py(px(layout::SPACE_XS))
-                    .child(section_label(t, "Connections"))
+                    .child(section_label(t, tr("Connections")))
                     .into_any_element(),
             );
             rows.extend(members.remove(&None).unwrap_or_default());
@@ -2142,7 +2145,7 @@ impl Workspace {
                             switcher_row(("empty-group", id), t)
                                 .text_color(t.text_muted)
                                 .child(row_icon(t, icon::PLUS))
-                                .child("Add connection")
+                                .child(tr("Add connection"))
                                 .on_click(move |_, window, cx| {
                                     _ = add_workspace.update(cx, |workspace, cx| {
                                         workspace.new_connection_in(project.clone(), window, cx);
@@ -2167,7 +2170,7 @@ impl Workspace {
                 rows.push(
                     group_header("no-project", current.is_none(), expanded, t)
                         .child(row_icon(t, icon::DATABASE))
-                        .child(div().flex_1().child("No project"))
+                        .child(div().flex_1().child(tr("No project")))
                         .on_click(move |_, _, cx| {
                             _ = all_workspace.update(cx, |workspace, cx| {
                                 workspace.toggle_group(None, cx);
@@ -2206,7 +2209,7 @@ impl Workspace {
             _ => switcher_row("new-project", t)
                 .text_color(t.text_muted)
                 .child(row_icon(t, icon::PLUS))
-                .child("New project")
+                .child(tr("New project"))
                 .on_click(move |_, window, cx| {
                     _ = workspace.update(cx, |workspace, cx| {
                         workspace.start_naming_project(None, window, cx);
@@ -2275,7 +2278,7 @@ impl Workspace {
                     Control::Inline,
                     t,
                 )
-                .tooltip("Rename project")
+                .tooltip(tr("Rename project"))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     _ = rename_workspace.update(cx, |workspace, cx| {
@@ -2293,13 +2296,13 @@ impl Workspace {
                 )
                 .when(pending, |armed| {
                     armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
-                        "Delete?",
+                        tr("Delete?"),
                         Tone::Danger,
                         Control::Inline,
                         t,
                     ))
                 })
-                .tooltip("Delete project (its connections are kept)")
+                .tooltip(tr("Delete project (its connections are kept)"))
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     _ = workspace.update(cx, |workspace, cx| {
@@ -2323,7 +2326,7 @@ impl Workspace {
             CatalogState::Loading => div()
                 .p(px(layout::SPACE_MD))
                 .text_color(t.text_muted)
-                .child("Loading database objects…")
+                .child(tr("Loading database objects…"))
                 .into_any_element(),
             CatalogState::Failed(message) => div()
                 .p(px(layout::SPACE_MD))
@@ -2333,7 +2336,7 @@ impl Workspace {
             CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => div()
                 .p(px(layout::SPACE_MD))
                 .text_color(t.text_muted)
-                .child("No database objects found.")
+                .child(tr("No database objects found."))
                 .into_any_element(),
             CatalogState::Loaded(..) => {
                 render_tree(
@@ -2440,24 +2443,26 @@ impl Workspace {
                     let ddl_workspace = menu_workspace.clone();
                     let ddl_names = (schema.clone(), relation.clone());
                     let menu = menu
-                        .item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
-                            let (schema, relation) = ddl_names.clone();
-                            _ = ddl_workspace.update(cx, |workspace, cx| {
-                                workspace.copy_ddl(schema, relation, kind, cx);
-                            });
-                        }))
+                        .item(
+                            PopupMenuItem::new(tr("Copy DDL")).on_click(move |_, _, cx| {
+                                let (schema, relation) = ddl_names.clone();
+                                _ = ddl_workspace.update(cx, |workspace, cx| {
+                                    workspace.copy_ddl(schema, relation, kind, cx);
+                                });
+                            }),
+                        )
                         .item(copy(
-                            "Copy SELECT (Top 100)",
+                            tr("Copy SELECT (Top 100)"),
                             select_top_sql(engine, &schema, &relation),
                         ))
                         .separator()
                         .item(copy(
-                            "Copy DROP",
+                            tr("Copy DROP"),
                             drop_sql(engine, &schema, &relation, kind),
                         ));
                     if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
                         menu.item(copy(
-                            "Copy TRUNCATE",
+                            tr("Copy TRUNCATE"),
                             truncate_sql(engine, &schema, &relation),
                         ))
                     } else {
@@ -2512,7 +2517,7 @@ fn note(t: Theme, text: &'static str) -> AnyElement {
         .py(px(layout::SPACE_XS))
         .text_size(px(layout::chrome(layout::TEXT_SM)))
         .text_color(t.text_muted)
-        .child(text)
+        .child(tr(text))
         .into_any_element()
 }
 

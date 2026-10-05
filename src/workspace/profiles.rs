@@ -7,6 +7,7 @@ use super::*;
 use gpui_component::menu::PopupMenuItem;
 
 use crate::connection_form::{ConnectionTest, duplicate_profile_name};
+use crate::i18n::{tr, trf};
 use crate::import::{self, Source};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
@@ -48,6 +49,7 @@ impl Workspace {
             opacity: Some(self.settings.opacity),
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
+            language: self.settings.language.clone(),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -172,11 +174,11 @@ impl Workspace {
         );
         // An unreadable sslmode only means anything to an engine that has one.
         let notice = unreadable_engine
-            .map(|message| format!("{message} Reading it as Postgres."))
+            .map(|message| trf!("{} Reading it as Postgres.", message))
             .or_else(|| {
                 unreadable_mode
                     .filter(|_| config.server().is_some())
-                    .map(|message| format!("{message} Connecting as verify-full."))
+                    .map(|message| trf!("{} Connecting as verify-full.", message))
             });
         if let Some(message) = notice {
             session.notice = Some(message);
@@ -539,7 +541,7 @@ impl Workspace {
             "mode",
             form.mode,
             vec![Mode::ALL.to_vec()],
-            |mode| mode.label().into(),
+            |mode| tr(mode.label()).into(),
             |_| None,
             |form, mode| {
                 form.mode = mode;
@@ -562,7 +564,7 @@ impl Workspace {
                     .chain(ConnectionColor::ALL.map(Some))
                     .collect(),
             ],
-            |color| color.map_or("None", ConnectionColor::label).into(),
+            |color| tr(color.map_or("None", ConnectionColor::label)).into(),
             |color| {
                 color.map(|color| {
                     div()
@@ -600,7 +602,7 @@ impl Workspace {
                         Control::Standard,
                         t,
                     )
-                    .tooltip("Choose an existing project")
+                    .tooltip(tr("Choose an existing project"))
                     .on_click(cx.listener(|workspace, _, _, cx| {
                         if let Some(form) = &mut workspace.form {
                             form.naming_project = false;
@@ -624,9 +626,9 @@ impl Workspace {
             ProjectChoice::In(form.project.clone()),
             vec![existing, vec![ProjectChoice::New]],
             |choice| match choice {
-                ProjectChoice::In(None) => "No project".into(),
+                ProjectChoice::In(None) => tr("No project").into(),
                 ProjectChoice::In(Some(name)) => name.clone().into(),
-                ProjectChoice::New => "New project…".into(),
+                ProjectChoice::New => tr("New project…").into(),
             },
             move |choice| {
                 let path = match choice {
@@ -886,7 +888,7 @@ impl Workspace {
         let engine = profile.config.engine();
         if !engine.switches_database() {
             self.note(
-                format!(
+                trf!(
                     "A {} connection has no other database to switch to.",
                     engine.label()
                 ),
@@ -895,7 +897,7 @@ impl Workspace {
             return;
         }
         let Some(connection) = profile.connection() else {
-            self.note("The connection is not open.".into(), cx);
+            self.note(tr("The connection is not open.").into(), cx);
             return;
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
@@ -970,13 +972,11 @@ impl Workspace {
                 .iter()
                 .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
             let message = match edited {
-                Some(tab) => format!(
-                    "{}.{} has cell edits that have not been applied, so the database was not \
-                     switched.",
+                Some(tab) => trf!(
+                    "{}.{} has cell edits that have not been applied, so the database was not switched.",
                     tab.schema, tab.name
                 ),
-                None => "A query tab has cell edits that have not been applied, so the database \
-                         was not switched."
+                None => tr("A query tab has cell edits that have not been applied, so the database was not switched.")
                     .into(),
             };
             self.note(message, cx);
@@ -1084,7 +1084,7 @@ impl Workspace {
             return;
         }
         self.importing = true;
-        self.note(format!("Reading {} connections…", source.label()), cx);
+        self.note(trf!("Reading {} connections…", source.label()), cx);
         let read = cx.background_executor().spawn(async move { source.read() });
         cx.spawn_in(window, async move |workspace, cx| {
             let report = read.await;
@@ -1114,7 +1114,7 @@ impl Workspace {
                     source,
                     report,
                     fresh,
-                    project: Some(format!("Imported from {}", source.label())),
+                    project: Some(trf!("Imported from {}", source.label())),
                 });
                 cx.notify();
             });
@@ -1156,7 +1156,7 @@ impl Workspace {
             ) {
                 added.skipped.push(import::Skipped {
                     name: imported.name,
-                    reason: "already imported".into(),
+                    reason: tr("already imported").into(),
                 });
                 continue;
             }
@@ -1313,7 +1313,7 @@ impl Workspace {
         // refused. The reason is the status bar's to carry -- repeating it here
         // paints the same sentence twice in the same red.
         let Some(connection) = profile.connection() else {
-            profile.catalog = CatalogState::Failed("Not connected.".into());
+            profile.catalog = CatalogState::Failed(tr("Not connected.").into());
             return;
         };
         let catalog_task = cx
@@ -1732,13 +1732,17 @@ pub(crate) fn is_unshared_imported_key<'a>(
 /// the same thing.
 pub(crate) fn removal_note(name: &str, queries: usize, problem: Option<String>) -> String {
     if let Some(problem) = problem {
-        return format!("Removed {name}, but its saved queries are still on disk: {problem}");
+        return trf!(
+            "Removed {}, but its saved queries are still on disk: {}",
+            name,
+            problem
+        );
     }
 
     match queries {
-        0 => format!("Removed {name}."),
-        1 => format!("Removed {name} and its saved query."),
-        _ => format!("Removed {name} and its {queries} saved queries."),
+        0 => trf!("Removed {}.", name),
+        1 => trf!("Removed {} and its saved query.", name),
+        _ => trf!("Removed {} and its {} saved queries.", name, queries),
     }
 }
 

@@ -26,6 +26,7 @@ use super::{
     QueryResult, RelationKind, Structure, assemble_catalog, assemble_structure, plain_error,
     terminated,
 };
+use crate::i18n::{tr, trf};
 
 /// What it takes to reach one database in one Snowflake account.
 ///
@@ -152,23 +153,23 @@ const TOKEN_LIFETIME: u64 = 59 * 60;
 fn key_pair(config: &SnowflakeConfig) -> Result<RsaKeyPair, DbError> {
     let path = &config.private_key;
     let text = std::fs::read_to_string(path).map_err(|error| {
-        plain_error(format!("The private key at {path} was not read: {error}."))
+        plain_error(trf!("The private key at {} was not read: {}.", path, error))
     })?;
-    let source = format!("The private key at {path}");
+    let source = trf!("The private key at {}", path);
     // PKCS#8's own header, and PKCS#1's `Proc-Type: 4,ENCRYPTED` -- the
     // scheme `openssl genrsa -aes256 -traditional` writes, which a PEM this
     // narrow otherwise waves through as DER and fails to parse unhelpfully.
     if text.contains("ENCRYPTED PRIVATE KEY") || text.contains("Proc-Type: 4,ENCRYPTED") {
-        return Err(plain_error(format!("{source} is encrypted.")));
+        return Err(plain_error(trf!("{} is encrypted.", source)));
     }
 
     let der =
-        key_der(&text).ok_or_else(|| plain_error(format!("{source} is not a private key.")))?;
+        key_der(&text).ok_or_else(|| plain_error(trf!("{} is not a private key.", source)))?;
     // PKCS#8 is what Snowflake's instructions produce; PKCS#1 is what
     // `BEGIN RSA PRIVATE KEY` holds, and `ring` reads either.
     RsaKeyPair::from_pkcs8(&der)
         .or_else(|_| RsaKeyPair::from_der(&der))
-        .map_err(|error| plain_error(format!("{source} is not an RSA key: {error}.")))
+        .map_err(|error| plain_error(trf!("{} is not an RSA key: {}.", source, error)))
 }
 
 /// The DER inside a key file however the key was written to it: as PEM, as
@@ -273,7 +274,7 @@ fn token(config: &SnowflakeConfig, now: u64) -> Result<String, DbError> {
         message.as_bytes(),
         &mut signature,
     )
-    .map_err(|error| plain_error(format!("The token was not signed: {error}.")))?;
+    .map_err(|error| plain_error(trf!("The token was not signed: {}.", error)))?;
 
     Ok(format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature)))
 }
@@ -464,7 +465,7 @@ fn reply(host: &str, status: u16, body: &Value) -> Result<Reply, DbError> {
 fn refusal(host: &str, status: u16, body: &Value) -> DbError {
     plain_error(match body["message"].as_str() {
         Some(message) => message.to_string(),
-        None => format!("{host} answered HTTP {status}."),
+        None => trf!("{} answered HTTP {}.", host, status),
     })
 }
 
@@ -516,8 +517,9 @@ fn last_child(body: &Value) -> Option<&str> {
 
 fn row_types(body: &Value) -> Result<Vec<RowType>, DbError> {
     serde_json::from_value(body["resultSetMetaData"]["rowType"].clone()).map_err(|error| {
-        plain_error(format!(
-            "The result's column description was not understood: {error}."
+        plain_error(trf!(
+            "The result's column description was not understood: {}.",
+            error
         ))
     })
 }
@@ -660,7 +662,7 @@ impl Connection {
         };
         let host = self.config.host();
         let mut response =
-            sent.map_err(|error| plain_error(format!("{host} was not reached: {error}.")))?;
+            sent.map_err(|error| plain_error(trf!("{} was not reached: {}.", host, error)))?;
         let status = response.status().as_u16();
         // No size limit: a partition is as large as the server made it, and
         // the default cap is smaller than one.
@@ -670,8 +672,10 @@ impl Connection {
             .limit(u64::MAX)
             .read_to_vec()
             .map_err(|error| {
-                plain_error(format!(
-                    "The answer from {host} was not read whole: {error}."
+                plain_error(trf!(
+                    "The answer from {} was not read whole: {}.",
+                    host,
+                    error
                 ))
             })?;
         let body = match serde_json::from_slice(&bytes) {
@@ -679,8 +683,10 @@ impl Connection {
             // A proxy's error page is not JSON, and its status is the message.
             Err(_) if !matches!(status, 200 | 202) => Value::Null,
             Err(error) => {
-                return Err(plain_error(format!(
-                    "The answer from {host} was not understood: {error}."
+                return Err(plain_error(trf!(
+                    "The answer from {} was not understood: {}.",
+                    host,
+                    error
                 )));
             }
         };
@@ -716,8 +722,8 @@ impl Connection {
     /// stopped on the way out, and the error says whether that worked.
     fn abandon(&self, handle: &str, error: DbError) -> DbError {
         let outcome = match self.stop(handle) {
-            Ok(()) => "It was asked to stop rather than left running unseen.".to_string(),
-            Err(stop) => format!(
+            Ok(()) => tr("It was asked to stop rather than left running unseen.").to_string(),
+            Err(stop) => trf!(
                 "It may still be running: asking it to stop failed too ({}).",
                 stop.message
             ),
@@ -770,8 +776,9 @@ impl Connection {
         // submit that finished is over.
         let handle = match handle.is_empty() {
             true if answer == Reply::Running => {
-                return Err(plain_error(format!(
-                    "{host} accepted a statement and named no handle."
+                return Err(plain_error(trf!(
+                    "{} accepted a statement and named no handle.",
+                    host
                 )));
             }
             _ => handle.to_string(),
@@ -790,9 +797,9 @@ impl Connection {
                 // handle and answered that nothing was running; the button is
                 // spent, so it is carried out here.
                 if asked && let Err(error) = self.stop(&handle) {
-                    return Err(plain_error(format!(
-                        "Cancel came before {host} named the statement, and stopping it \
-                         once named failed ({}). It may still be running.",
+                    return Err(plain_error(trf!(
+                        "Cancel came before {} named the statement, and stopping it once named failed ({}). It may still be running.",
+                        host,
                         error.message
                     )));
                 }
@@ -988,7 +995,7 @@ impl Connection {
             .first()
             .and_then(|row| row.first()?.as_deref())
             .map(terminated)
-            .ok_or_else(|| plain_error(format!("{name} has no definition to show.")))
+            .ok_or_else(|| plain_error(trf!("{} has no definition to show.", name)))
     }
 
     /// Run statements dbdelve wrote all at the same time, in their own order.
@@ -1014,7 +1021,9 @@ impl Connection {
             }
             for (slot, thread) in results.iter_mut().zip(threads) {
                 *slot = thread.join().unwrap_or_else(|_| {
-                    Err(plain_error("A catalog query did not finish.".to_string()))
+                    Err(plain_error(
+                        tr("A catalog query did not finish.").to_string(),
+                    ))
                 });
             }
         });
@@ -1096,7 +1105,7 @@ fn strip_signature_parens(mut result: QueryResult) -> QueryResult {
 fn appended(mut first: QueryResult, second: QueryResult) -> Result<QueryResult, DbError> {
     if first.columns != second.columns {
         return Err(plain_error(
-            "Two catalog queries answered with different columns.".to_string(),
+            tr("Two catalog queries answered with different columns.").to_string(),
         ));
     }
     first.rows.extend(second.rows);

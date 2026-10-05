@@ -7,6 +7,7 @@
 //! `render_main_content` is the only way in. Everything else is a part of the
 //! surface it assembles, which is why the rest of the module is private.
 
+use crate::i18n::{self, tr, trf};
 use gpui::{
     Animation, AnimationExt, AnyElement, AppContext, ClickEvent, Context, Div, Entity, FontWeight,
     InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
@@ -140,17 +141,17 @@ fn render_editor_surface(
                 // editor drew permanently greyed -- dbdelve registers neither
                 // provider, and no language server is coming.
                 .context_menu(|menu, _, cx| {
-                    menu.menu("Cut", Box::new(input::Cut))
-                        .menu("Copy", Box::new(input::Copy))
+                    menu.menu(tr("Cut"), Box::new(input::Cut))
+                        .menu(tr("Copy"), Box::new(input::Copy))
                         .menu_with_disabled(
-                            "Paste",
+                            tr("Paste"),
                             cx.read_from_clipboard().is_none(),
                             Box::new(input::Paste),
                         )
                         .separator()
-                        .menu("Select All", Box::new(input::SelectAll))
+                        .menu(tr("Select All"), Box::new(input::SelectAll))
                         .separator()
-                        .menu("Format Query", Box::new(FormatQuery))
+                        .menu(tr("Format Query"), Box::new(FormatQuery))
                 }),
         );
 
@@ -196,7 +197,7 @@ fn render_query_surface(
             .justify_center()
             .text_size(px(layout::chrome(layout::TEXT_SM)))
             .text_color(t.text_faint)
-            .child("Open a table from the sidebar, or start a new query.")
+            .child(tr("Open a table from the sidebar, or start a new query."))
             .into_any_element();
     };
     // Scopes this tab's scroll state (plan, grid, row panel) to its own id, so
@@ -369,10 +370,10 @@ fn render_plan(
                             // is the thing a plan is usually read to find.
                             .children(node.actual.map(|actual| {
                                 metric(
-                                    "actual",
-                                    format!(
-                                        "{:.3} ms · {} rows · {} loops",
-                                        actual.total_ms,
+                                    tr("actual"),
+                                    trf!(
+                                        "{} ms · {} rows · {} loops",
+                                        format!("{:.3}", actual.total_ms),
                                         round_count(actual.rows),
                                         round_count(actual.loops)
                                     ),
@@ -381,17 +382,17 @@ fn render_plan(
                             }))
                             .children(node.estimated.map(|estimated| {
                                 metric(
-                                    "est",
-                                    format!(
-                                        "cost {:.2} · {} rows",
-                                        estimated.total_cost,
+                                    tr("est"),
+                                    trf!(
+                                        "cost {} · {} rows",
+                                        format!("{:.2}", estimated.total_cost),
                                         group_thousands(estimated.rows)
                                     ),
                                     t.syntax_number.into(),
                                 )
                             }))
                             .children(node.self_ms.filter(|_| total.is_some()).map(|ms| {
-                                metric("self", format!("{ms:.3} ms"), t.text_muted.into())
+                                metric(tr("self"), format!("{ms:.3} ms"), t.text_muted.into())
                             })),
                     ),
             )
@@ -427,7 +428,7 @@ fn render_plan(
                     div()
                         .flex_shrink_0()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(mode.label()),
+                        .child(tr(mode.label())),
                 )
                 .child(
                     div()
@@ -465,7 +466,7 @@ fn render_plan(
                         )
                         .into_any_element(),
                     false => icon_button("copy-plan", icon::COPY, Tone::Quiet, Control::Compact, t)
-                        .tooltip("Copy plan")
+                        .tooltip(tr("Copy plan"))
                         .on_click(cx.listener(|workspace, _, _, cx| workspace.copy_plan(cx)))
                         .into_any_element(),
                 }),
@@ -631,7 +632,7 @@ fn render_filter_bar(
                             false => filter
                                 .column
                                 .clone()
-                                .unwrap_or_else(|| "Column…".to_string()),
+                                .unwrap_or_else(|| tr("Column…").to_string()),
                         },
                         Tone::Quiet,
                         Control::Compact,
@@ -730,7 +731,7 @@ fn render_filter_bar(
                         Control::Compact,
                         t,
                     )
-                    .tooltip("Remove filter")
+                    .tooltip(tr("Remove filter"))
                     .on_click(move |_, window, cx| {
                         window.dispatch_action(Box::new(RemoveFilter { row }), cx);
                     }),
@@ -746,11 +747,16 @@ fn render_filter_bar(
                     })
                 }))
                 .child(
-                    button("add-filter", "Add filter", Tone::Quiet, Control::Compact, t).on_click(
-                        |_, window, cx| {
-                            window.dispatch_action(Box::new(AddFilter), cx);
-                        },
-                    ),
+                    button(
+                        "add-filter",
+                        tr("Add filter"),
+                        Tone::Quiet,
+                        Control::Compact,
+                        t,
+                    )
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(AddFilter), cx);
+                    }),
                 ),
         )
         .into_any_element()
@@ -759,7 +765,7 @@ fn render_filter_bar(
 /// `AND` or `OR`, as the two-state button it is. A dropdown of two rows is a
 /// menu to open for something a click already says.
 fn join_button(id: impl Into<gpui::ElementId>, conjunction: Conjunction, t: Theme) -> Button {
-    button(id, conjunction.as_str(), Tone::Quiet, Control::Compact, t).tooltip("AND or OR")
+    button(id, conjunction.as_str(), Tone::Quiet, Control::Compact, t).tooltip(tr("AND or OR"))
 }
 
 /// One line of the filter stack, at the height every other control strip is.
@@ -853,14 +859,16 @@ fn render_new_row_panel(
         .flex_col()
         .gap(px(layout::SPACE_MD))
         .p(px(layout::SPACE_MD))
-        .child(section_label(t, "New row"))
+        .child(section_label(t, tr("New row")))
         // The one line that says what an empty field means, because the
         // three-way rule is invisible otherwise.
         .child(
             div()
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
-                .child("A field left blank is left out, so the column keeps its default."),
+                .child(tr(
+                    "A field left blank is left out, so the column keeps its default.",
+                )),
         )
         .child(
             div()
@@ -882,7 +890,7 @@ fn render_new_row_panel(
                 .child(
                     button(
                         "cancel-new-row",
-                        "Cancel",
+                        tr("Cancel"),
                         Tone::Quiet,
                         Control::Standard,
                         t,
@@ -918,8 +926,8 @@ fn render_routine(tab: &ObjectTab, scope: &str, cx: &mut Context<Workspace>) -> 
         return div().into_any_element();
     };
     let kind = match routine.kind {
-        RoutineKind::Function => "Function",
-        RoutineKind::Procedure => "Procedure",
+        RoutineKind::Function => tr("Function"),
+        RoutineKind::Procedure => tr("Procedure"),
     };
 
     div()
@@ -950,15 +958,15 @@ fn render_routine(tab: &ObjectTab, scope: &str, cx: &mut Context<Workspace>) -> 
                         .text_size(px(layout::chrome(layout::TEXT_SM)))
                         .text_color(t.text_muted)
                         .child(kind)
-                        .child(format!("Language: {}", routine.language))
+                        .child(trf!("Language: {}", routine.language))
                         .children(
                             (!routine.result_type.is_empty())
-                                .then(|| div().child(format!("Returns: {}", routine.result_type))),
+                                .then(|| div().child(trf!("Returns: {}", routine.result_type))),
                         )
                         .child(div().ml_auto().child(key_hint(
                             t,
                             "escape",
-                            "returns to the editor",
+                            tr("returns to the editor"),
                         ))),
                 ),
         )
@@ -1059,9 +1067,9 @@ fn render_results(
         // click gets, and the statement is still running, so the button goes
         // inert rather than away.
         let label = match cancelling {
-            Some(sent) if sent.elapsed() >= CANCEL_PATIENCE => "Still waiting on server…",
-            Some(_) => "Cancelling…",
-            None => "Cancel",
+            Some(sent) if sent.elapsed() >= CANCEL_PATIENCE => tr("Still waiting on server…"),
+            Some(_) => tr("Cancelling…"),
+            None => tr("Cancel"),
         };
         let timer = started.map(|started| quiet_line(clock(started.elapsed())));
         div()
@@ -1112,7 +1120,7 @@ fn render_results(
             key_hint(
                 t,
                 "secondary-enter",
-                "runs the selection or statement under the cursor",
+                tr("runs the selection or statement under the cursor"),
             )
             .into_any_element(),
         )),
@@ -1121,7 +1129,7 @@ fn render_results(
                 .and_then(|tab| error_in_buffer(tab, cx))
                 .map(|(at, _)| at);
             let position = match (at, error.position) {
-                (None, Some(position)) => format!(" (at byte {position})"),
+                (None, Some(position)) => trf!(" (at byte {})", position),
                 _ => String::new(),
             };
             Some(
@@ -1142,11 +1150,7 @@ fn render_results(
                             div().flex().child(
                                 button(
                                     "jump-to-error",
-                                    format!(
-                                        "Go to line {}, column {}",
-                                        at.line + 1,
-                                        at.character + 1
-                                    ),
+                                    trf!("Go to line {}, column {}", at.line + 1, at.character + 1),
                                     Tone::Quiet,
                                     Control::Compact,
                                     t,
@@ -1177,8 +1181,8 @@ fn render_results(
             rows_affected,
             ..
         } if *rows == 0 && !has_rows => Some(centered(quiet_line(match rows_affected {
-            Some(rows) => format!("Query completed. Server row count: {rows}."),
-            None => "Query completed.".into(),
+            Some(rows) => trf!("Query completed. Server row count: {}.", rows),
+            None => tr("Query completed.").into(),
         }))),
         _ => None,
     };
@@ -1209,7 +1213,7 @@ fn render_results(
                     .border_b_1()
                     .border_color(t.border)
                     .child(spinner())
-                    .child(quiet_line("Refreshing…".into()))
+                    .child(quiet_line(tr("Refreshing…").into()))
                     .child(div().ml_auto().child(cancel(cx)))
             }),
         )
@@ -1426,9 +1430,9 @@ fn result_chip(
 ) -> AnyElement {
     let t = *theme(cx);
     let (readout, tint) = match state {
-        QueryState::Running { .. } => (Some("running".to_string()), t.text_muted),
+        QueryState::Running { .. } => (Some(tr("running").to_string()), t.text_muted),
         QueryState::Complete { rows, .. } => (Some(compact_count(*rows)), t.text_faint),
-        QueryState::Failed(_) => (Some("failed".to_string()), t.danger),
+        QueryState::Failed(_) => (Some(tr("failed").to_string()), t.danger),
         _ => (None, t.text_faint),
     };
     div()
@@ -1518,7 +1522,7 @@ fn render_row_inspector(
                         .h(px(layout::chrome(layout::TAB_HEIGHT)))
                         .flex()
                         .items_center()
-                        .child(fold("show-row-inspector", "Show the row panel", cx)),
+                        .child(fold("show-row-inspector", tr("Show the row panel"), cx)),
                 )
                 .into_any_element(),
         );
@@ -1544,7 +1548,7 @@ fn render_row_inspector(
                         div()
                             .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.text_muted)
-                            .child(format!(
+                            .child(trf!(
                                 "Row {} of {}",
                                 group_thousands(row_ix as u64 + 1),
                                 group_thousands(rows as u64)
@@ -1555,7 +1559,7 @@ fn render_row_inspector(
                             .ml_auto()
                             .flex()
                             .items_center()
-                            .child(fold("hide-row-inspector", "Hide the row panel", cx))
+                            .child(fold("hide-row-inspector", tr("Hide the row panel"), cx))
                             .child(
                                 icon_button(
                                     "close-row-inspector",
@@ -1564,7 +1568,7 @@ fn render_row_inspector(
                                     Control::Compact,
                                     t,
                                 )
-                                .tooltip("Close the row panel")
+                                .tooltip(tr("Close the row panel"))
                                 .on_click(move |_, _, cx| {
                                     table.update(cx, |table, cx| table.clear_selection(cx));
                                 }),
@@ -1615,7 +1619,7 @@ fn render_row_inspector(
                                         Control::Compact,
                                         t,
                                     )
-                                    .tooltip("Copy value")
+                                    .tooltip(tr("Copy value"))
                                     .on_click(cx.listener(
                                         move |workspace, _, _, cx| {
                                             workspace.copy_row_field(row_ix, col_ix, cx);
@@ -1768,7 +1772,7 @@ fn render_structure(
             return div()
                 .p(px(layout::SPACE_LG))
                 .text_color(t.text_muted)
-                .child("Loading structure…")
+                .child(tr("Loading structure…"))
                 .into_any_element();
         }
         StructureState::Failed(message) => {
@@ -1828,7 +1832,7 @@ fn render_structure(
         .flex()
         .flex_col()
         .gap(px(layout::SPACE_XS))
-        .child(heading("Columns"))
+        .child(heading(tr("Columns")))
         .children(structure.columns.iter().map(|column| {
             div()
                 .flex()
@@ -1852,9 +1856,9 @@ fn render_structure(
                         .min_w(px(80.))
                         .text_color(t.text_muted)
                         .child(if column.nullable {
-                            "nullable"
+                            tr("nullable")
                         } else {
-                            "not null"
+                            tr("not null")
                         }),
                 )
                 .child(
@@ -1868,9 +1872,9 @@ fn render_structure(
                         .child(column.default.clone().unwrap_or_default()),
                 )
         }))
-        .children((!structure.indexes.is_empty()).then(|| heading("Indexes")))
+        .children((!structure.indexes.is_empty()).then(|| heading(tr("Indexes"))))
         .children(definitions(&structure.indexes))
-        .children((!structure.constraints.is_empty()).then(|| heading("Constraints")))
+        .children((!structure.constraints.is_empty()).then(|| heading(tr("Constraints"))))
         .children(definitions(&structure.constraints))
         .into_any_element()
 }
@@ -1915,7 +1919,7 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
                 div()
                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .text_color(t.text_faint)
-                    .child("Rows"),
+                    .child(tr("Rows")),
             )
             .children(chips)
     });
@@ -1937,7 +1941,7 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
                         Control::Compact,
                         t,
                     )
-                    .tooltip("Previous page")
+                    .tooltip(tr("Previous page"))
                     .on_click(move |_, window, cx| {
                         window.dispatch_action(Box::new(PreviousPage), cx);
                     })
@@ -1977,7 +1981,7 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
                         Control::Compact,
                         t,
                     )
-                    .tooltip("Next page")
+                    .tooltip(tr("Next page"))
                     .on_click(move |_, window, cx| {
                         window.dispatch_action(Box::new(NextPage), cx);
                     })
@@ -2114,8 +2118,8 @@ fn render_tab_strip(
             let open_workspace = workspace.clone();
             let close_workspace = workspace.clone();
             let label = match index {
-                0 => "New Query".to_string(),
-                _ => format!("New Query {}", index + 1),
+                0 => tr("New Query").to_string(),
+                _ => trf!("New Query {}", index + 1),
             };
             chip(session.active == Tab::Query(id))
                 .id(("unsaved-query-tab", id as usize))
@@ -2137,7 +2141,7 @@ fn render_tab_strip(
                                 Control::Inline,
                                 t,
                             )
-                            .tooltip("Close tab")
+                            .tooltip(tr("Close tab"))
                             .on_click(move |_, window, cx| {
                                 // Or the chip underneath activates the tab
                                 // this just closed, in the same click.
@@ -2207,13 +2211,13 @@ fn render_tab_strip(
                                 )
                                 .when(pending, |armed| {
                                     armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
-                                        "Delete?",
+                                        tr("Delete?"),
                                         Tone::Danger,
                                         Control::Inline,
                                         t,
                                     ))
                                 })
-                                .tooltip("Delete query")
+                                .tooltip(tr("Delete query"))
                                 .on_click(move |_, window, cx| {
                                     // Or the chip underneath opens the query in
                                     // the same click, and the confirmation this
@@ -2289,7 +2293,7 @@ fn render_tab_strip(
                             Control::Inline,
                             t,
                         )
-                        .tooltip("Close tab")
+                        .tooltip(tr("Close tab"))
                         .on_click(move |_, window, cx| {
                             // Or the chip underneath activates the tab
                             // this just closed, in the same click.
@@ -2353,9 +2357,9 @@ fn render_tab_strip(
                     t,
                 )
                 .tooltip(if naming_a_rename {
-                    "Rename query"
+                    tr("Rename query")
                 } else {
-                    "Save query"
+                    tr("Save query")
                 })
                 .on_click(move |_, window, cx| {
                     _ = confirm_workspace.update(cx, |workspace, cx| {
@@ -2377,14 +2381,14 @@ fn render_tab_strip(
                 .flex()
                 .gap(px(layout::SPACE_XS))
                 .child(preview_tab(
-                    "Data",
+                    tr("Data"),
                     icon::TABLE,
                     !showing_structure,
                     Command::ShowStructure(false),
                     cx,
                 ))
                 .child(preview_tab(
-                    "Structure",
+                    tr("Structure"),
                     icon::STRUCTURE,
                     *showing_structure,
                     Command::ShowStructure(true),
@@ -2405,14 +2409,14 @@ fn render_tab_strip(
                 .flex()
                 .gap(px(layout::SPACE_XS))
                 .child(preview_tab(
-                    "Data",
+                    tr("Data"),
                     icon::TABLE,
                     !tab.showing_plan,
                     Command::ShowPlan(false),
                     cx,
                 ))
                 .child(preview_tab(
-                    "Plan",
+                    tr("Plan"),
                     icon::PLAN,
                     tab.showing_plan,
                     Command::ShowPlan(true),
@@ -2427,7 +2431,7 @@ fn render_tab_strip(
         .is_some_and(|tab| tab.takes_inserts(engine))
         .then(|| {
             div().flex_shrink_0().child(
-                button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
+                button("new-row", tr("New row"), Tone::Quiet, Control::Compact, t).on_click(
                     |_, window, cx| {
                         window.dispatch_action(Box::new(NewRow), cx);
                     },
@@ -2438,9 +2442,9 @@ fn render_tab_strip(
     // 100% is not information; a pane's readout appears only once its zoom
     // has somewhere to return to.
     let zoom: Vec<String> = [
-        ("Chrome", chrome_zoom, true),
-        ("Editor", editor_zoom, runnable),
-        ("Grid", grid_zoom, session.active_results().is_some()),
+        (tr("Chrome"), chrome_zoom, true),
+        (tr("Editor"), editor_zoom, runnable),
+        (tr("Grid"), grid_zoom, session.active_results().is_some()),
     ]
     .into_iter()
     .filter(|&(_, percent, shown)| shown && percent != 100)
@@ -2508,7 +2512,7 @@ fn render_tab_strip(
                     Control::Compact,
                     t,
                 )
-                .tooltip_with_action("New query", &NewQuery, None)
+                .tooltip_with_action(tr("New query"), &NewQuery, None)
                 .on_click(move |_, window, cx| {
                     _ = new_workspace.update(cx, |workspace, cx| {
                         workspace.new_query(&NewQuery, window, cx);
@@ -2520,14 +2524,11 @@ fn render_tab_strip(
         .children(plan_toggle)
         .children(new_row)
         .children((!zoom.is_empty()).then(|| {
-            div()
-                .flex_shrink_0()
-                .text_color(t.text_faint)
-                .child(format!(
-                    "{} · {} resets",
-                    zoom.join(" · "),
-                    keycap_text("secondary-0")
-                ))
+            div().flex_shrink_0().text_color(t.text_faint).child(trf!(
+                "{} · {} resets",
+                zoom.join(" · "),
+                keycap_text("secondary-0")
+            ))
         }))
         .children(naming)
         // A named query is already written to disk on every swap, so there
@@ -2541,7 +2542,7 @@ fn render_tab_strip(
                 Control::Compact,
                 t,
             )
-            .tooltip("Rename query")
+            .tooltip(tr("Rename query"))
             .on_click(move |_, window, cx| {
                 _ = rename_workspace.update(cx, |workspace, cx| {
                     workspace.rename_query(window, cx);
@@ -2550,7 +2551,7 @@ fn render_tab_strip(
         }))
         .children((runnable && !session.naming && !named).then(|| {
             icon_button("save-query", icon::SAVE, Tone::Quiet, Control::Compact, t)
-                .tooltip_with_action("Save query", &SaveQuery, None)
+                .tooltip_with_action(tr("Save query"), &SaveQuery, None)
                 .on_click(move |_, window, cx| {
                     _ = save_workspace.update(cx, |workspace, cx| {
                         workspace.save_query(&SaveQuery, window, cx);
@@ -2577,7 +2578,7 @@ fn render_tab_strip(
                     t,
                 )
                 .tooltip_with_action(
-                    "Explain",
+                    tr("Explain"),
                     &ExplainQuery {
                         mode: ExplainMode::Plan,
                     },
@@ -2591,7 +2592,7 @@ fn render_tab_strip(
                         .filter(|mode| engine.explain_prefix(*mode).is_some())
                         .fold(menu, |menu, mode| {
                             menu.menu(
-                                format!("{} — {}", mode.label(), mode.caption()),
+                                format!("{} — {}", tr(mode.label()), tr(mode.caption())),
                                 Box::new(ExplainQuery { mode }),
                             )
                         })
@@ -2603,7 +2604,7 @@ fn render_tab_strip(
             // what the surface is for, and the fill is the only hierarchy
             // available without spending a colour on it.
             icon_button("run-query", icon::RUN, Tone::Primary, Control::Compact, t)
-                .tooltip_with_action("Run", &RunQuery, None)
+                .tooltip_with_action(tr("Run"), &RunQuery, None)
                 .on_click(move |_, window, cx| {
                     _ = run_workspace.update(cx, |workspace, cx| {
                         workspace.run_query(&RunQuery, window, cx);
@@ -2627,14 +2628,14 @@ pub fn render_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> An
         .gap(px(layout::SPACE_XS))
         .child(settings_chip(
             "settings-tab-general",
-            "General",
+            tr("General"),
             tab == SettingsTab::General,
             cx,
             |workspace, _, cx| workspace.set_settings_tab(SettingsTab::General, cx),
         ))
         .child(settings_chip(
             "settings-tab-keybindings",
-            "Keybindings",
+            tr("Keybindings"),
             tab == SettingsTab::Keybindings,
             cx,
             |workspace, _, cx| workspace.set_settings_tab(SettingsTab::Keybindings, cx),
@@ -2657,16 +2658,25 @@ pub fn render_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> An
         .justify_center()
         .child(
             dialog(t)
-                .child(section_label(t, "Settings"))
+                .child(section_label(t, tr("Settings")))
                 .child(tabs)
                 .child(body)
-                .child(div().flex().justify_end().child(
-                    button("settings-done", "Done", Tone::Primary, Control::Standard, t).on_click(
-                        cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                            workspace.close_settings(window, cx);
-                        }),
+                .child(
+                    div().flex().justify_end().child(
+                        button(
+                            "settings-done",
+                            tr("Done"),
+                            Tone::Primary,
+                            Control::Standard,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            |workspace, _: &ClickEvent, window, cx| {
+                                workspace.close_settings(window, cx);
+                            },
+                        )),
                     ),
-                )),
+                ),
         )
         .into_any_element()
 }
@@ -2679,6 +2689,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     let preview_rows = workspace.settings.preview_rows;
     let check_for_updates = workspace.settings.check_for_updates;
     let color_titlebar = workspace.settings.color_titlebar;
+    let language = workspace.settings.language.clone();
 
     // Like the font rows below: the palette lists the themes, and moving
     // through it previews each one on this card.
@@ -2731,20 +2742,26 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                 })),
         )
         .child(
-            button("opacity-reset", "Reset", Tone::Quiet, Control::Compact, t)
-                .disabled(!t.is_glass)
-                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                    workspace.set_opacity(default_opacity, window, cx);
-                })),
+            button(
+                "opacity-reset",
+                tr("Reset"),
+                Tone::Quiet,
+                Control::Compact,
+                t,
+            )
+            .disabled(!t.is_glass)
+            .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                workspace.set_opacity(default_opacity, window, cx);
+            })),
         );
 
     // The palette rather than a dropdown of our own: it already lists every
     // family the text system resolved and marks the one in use. It opens over
     // this card and leaves it standing, so a pick lands back here.
     let font_rows: Vec<AnyElement> = [
-        ("Chrome", FontSlot::Chrome),
-        ("Editor", FontSlot::Editor),
-        ("Grid", FontSlot::Grid),
+        (tr("Chrome"), FontSlot::Chrome),
+        (tr("Editor"), FontSlot::Editor),
+        (tr("Grid"), FontSlot::Grid),
     ]
     .into_iter()
     .enumerate()
@@ -2783,7 +2800,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                 )
                 .min_w(px(layout::chrome(32.)))
                 .disabled(size == default)
-                .tooltip(format!("Reset to {default}"))
+                .tooltip(trf!("Reset to {}", default))
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                     workspace.set_font_size(slot, default, cx);
                 })),
@@ -2845,12 +2862,12 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         .gap(px(layout::SPACE_MD))
         .child(settings_section(
             t,
-            "Theme",
+            tr("Theme"),
             div().flex().child(theme_picker),
         ))
         .child(settings_section(
             t,
-            "Opacity",
+            tr("Opacity"),
             div()
                 .flex()
                 .flex_col()
@@ -2861,16 +2878,13 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                         .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .text_color(t.text_faint)
                         .child(
-                            "Everything else is relative to this. The chrome, \
-                             the editor and the results grid are tints over \
-                             the frost set here, so they move with it rather \
-                             than being set apiece.",
+                            tr("Everything else is relative to this. The chrome, the editor and the results grid are tints over the frost set here, so they move with it rather than being set apiece."),
                         ),
                 ),
         ))
         .child(settings_section(
             t,
-            "Fonts",
+            tr("Fonts"),
             div()
                 .flex()
                 .flex_col()
@@ -2879,18 +2893,18 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         ))
         .child(settings_section(
             t,
-            "Default limit",
+            tr("Default limit"),
             div().flex().gap(px(layout::SPACE_XS)).children(limits),
         ))
         .child(settings_section(
             t,
-            "Check for updates",
+            tr("Check for updates"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(layout::SPACE_XS))
                 .child(div().flex().gap(px(layout::SPACE_XS)).children(
-                    [(true, "On"), (false, "Off")].map(|(check, label)| {
+                    [(true, tr("On")), (false, tr("Off"))].map(|(check, label)| {
                         settings_chip(
                             ("check-for-updates", check as usize),
                             label,
@@ -2905,21 +2919,19 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                         .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .text_color(t.text_faint)
                         .child(
-                            "One request to GitHub at launch to see whether a \
-                             newer release exists. Nothing is sent about you \
-                             or your databases.",
+                            tr("One request to GitHub at launch to see whether a newer release exists. Nothing is sent about you or your databases."),
                         ),
                 ),
         ))
         .child(settings_section(
             t,
-            "Color the titlebar",
+            tr("Color the titlebar"),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(layout::SPACE_XS))
                 .child(div().flex().gap(px(layout::SPACE_XS)).children(
-                    [(true, "On"), (false, "Off")].map(|(color, label)| {
+                    [(true, tr("On")), (false, tr("Off"))].map(|(color, label)| {
                         settings_chip(
                             ("color-titlebar", color as usize),
                             label,
@@ -2933,7 +2945,43 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                     div()
                         .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .text_color(t.text_faint)
-                        .child("Paint the titlebar in the connection's color."),
+                        .child(tr("Paint the titlebar in the connection's color.")),
+                ),
+        ))
+        .child(settings_section(
+            t,
+            tr("Language"),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_XS))
+                .child(
+                    div().flex().gap(px(layout::SPACE_XS)).children(
+                        std::iter::once((None, tr("System")))
+                            .chain(
+                                i18n::LANGUAGES
+                                    .iter()
+                                    .map(|(code, name)| (Some(code.to_string()), *name)),
+                            )
+                            .enumerate()
+                            .map(|(index, (code, label))| {
+                                settings_chip(
+                                    ("language", index),
+                                    label,
+                                    code == language,
+                                    cx,
+                                    move |workspace, _, cx| {
+                                        workspace.set_language(code.clone(), cx)
+                                    },
+                                )
+                            }),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                        .text_color(t.text_faint)
+                        .child(tr("Takes effect the next time DBDelve starts.")),
                 ),
         ))
         .into_any_element()
@@ -2974,7 +3022,7 @@ fn chord_caps(
         return div()
             .text_size(px(layout::chrome(layout::TEXT_XS)))
             .text_color(t.text_faint)
-            .child("Unbound")
+            .child(tr("Unbound"))
             .into_any_element();
     }
     div()
@@ -3011,7 +3059,7 @@ fn render_keybinding_row(
             .gap(px(layout::SPACE_SM))
             .text_size(px(layout::chrome(layout::TEXT_XS)))
             .text_color(t.text_faint)
-            .child("Press any key… (Esc to cancel)")
+            .child(tr("Press any key… (Esc to cancel)"))
             .into_any_element()
     } else {
         div()
@@ -3022,7 +3070,7 @@ fn render_keybinding_row(
             .child(
                 button(
                     SharedString::from(format!("keybind-edit-{id}")),
-                    "Edit",
+                    tr("Edit"),
                     Tone::Quiet,
                     Control::Compact,
                     t,
@@ -3034,7 +3082,7 @@ fn render_keybinding_row(
             .children(has_override.then(|| {
                 button(
                     SharedString::from(format!("keybind-reset-{id}")),
-                    "Reset",
+                    tr("Reset"),
                     Tone::Quiet,
                     Control::Compact,
                     t,
@@ -3056,7 +3104,7 @@ fn render_keybinding_row(
             div()
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text)
-                .child(spec.label),
+                .child(tr(spec.label)),
         )
         .child(trailing)
         .into_any_element()

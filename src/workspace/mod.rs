@@ -22,6 +22,7 @@ use gpui_component::menu::DropdownMenu;
 pub(crate) use queries::error_in_buffer;
 
 use crate::connection_form::{Origin, password_to_persist};
+use crate::i18n::{tr, trf};
 use crate::session::{catalog_relation, write_buffer, write_grids};
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};
 use crate::theme::{install_fonts, install_theme, restored_fonts, restored_theme};
@@ -48,6 +49,9 @@ pub(crate) struct Settings {
     /// Some people want the connection colour on the switcher only, not a
     /// painted band across the window.
     pub(crate) color_titlebar: bool,
+    /// An `i18n::LANGUAGES` code, or none to follow the system. Read by
+    /// `i18n::init` at launch, so a change shows on the next one.
+    pub(crate) language: Option<String>,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -74,6 +78,7 @@ impl Default for Settings {
             theme_opacity: HashMap::new(),
             check_for_updates: true,
             color_titlebar: true,
+            language: None,
             custom_keybindings: HashMap::new(),
         }
     }
@@ -366,6 +371,7 @@ impl Workspace {
                 workspace.settings.check_for_updates =
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
+                workspace.settings.language = stored_settings.language.clone();
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -774,6 +780,15 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn set_language(&mut self, language: Option<String>, cx: &mut Context<Self>) {
+        if self.settings.language == language {
+            return;
+        }
+        self.settings.language = language;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
     /// Written through for the same reason the zoom is: a font that resets on
     /// relaunch is a setting the user has to make again every morning.
     pub(crate) fn set_font(&mut self, slot: FontSlot, family: String, cx: &mut Context<Self>) {
@@ -1051,8 +1066,8 @@ impl Render for Workspace {
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
         let status = match &profile.state {
-            ProfileState::Idle => "Connection is idle.".to_string(),
-            ProfileState::Connecting => format!("Connecting to {}…", profile.config.endpoint()),
+            ProfileState::Idle => tr("Connection is idle.").to_string(),
+            ProfileState::Connecting => trf!("Connecting to {}…", profile.config.endpoint()),
             // Connected is the one state worth spending on decoration: every
             // other one is news, and news beats where the connection points.
             // Its name is already on the switcher in the titlebar.
@@ -1139,17 +1154,23 @@ impl Render for Workspace {
                             .gap(px(layout::SPACE_SM))
                             .child(div().whitespace_nowrap().text_color(t.text_faint).child(
                                 match cancelling {
-                                    true => "Cancelling count…",
-                                    false => "Counting rows…",
+                                    true => tr("Cancelling count…"),
+                                    false => tr("Counting rows…"),
                                 },
                             ))
                             .children((!cancelling).then(|| {
-                                button("cancel-count", "Cancel", Tone::Quiet, Control::Compact, t)
-                                    .on_click(move |_, _, cx| {
-                                        _ = workspace.update(cx, |workspace, cx| {
-                                            workspace.cancel_count(id, cx);
-                                        });
-                                    })
+                                button(
+                                    "cancel-count",
+                                    tr("Cancel"),
+                                    Tone::Quiet,
+                                    Control::Compact,
+                                    t,
+                                )
+                                .on_click(move |_, _, cx| {
+                                    _ = workspace.update(cx, |workspace, cx| {
+                                        workspace.cancel_count(id, cx);
+                                    });
+                                })
                             }))
                             .into_any_element(),
                     ),
@@ -1157,7 +1178,7 @@ impl Render for Workspace {
                     _ => {
                         let sql = explorer::count_sql(engine, &tab.schema, &tab.name, filter);
                         Some(
-                            button("count-rows", "Count", Tone::Quiet, Control::Compact, t)
+                            button("count-rows", tr("Count"), Tone::Quiet, Control::Compact, t)
                                 .tooltip(sql)
                                 .on_click(move |_, _, cx| {
                                     _ = workspace.update(cx, |workspace, cx| {
@@ -1192,8 +1213,8 @@ impl Render for Workspace {
                 // buffer's statement is the user's to run again, and nothing
                 // else would tell them the rows are waiting on it.
                 Some(match snapshot_age {
-                    Some(age) if stale_buffer => joined(format!("from {age} ago")),
-                    Some(age) => joined(format!("snapshot from {age} ago")),
+                    Some(age) if stale_buffer => joined(trf!("from {} ago", age)),
+                    Some(age) => joined(trf!("snapshot from {} ago", age)),
                     None => joined(format!(
                         "{} \u{b7} {elapsed:.1?}",
                         human_bytes(*bytes as u64)
@@ -1205,17 +1226,18 @@ impl Render for Workspace {
             // last. What the run itself is worth saying is how long the server
             // spent answering.
             Some(QueryState::Explained { elapsed, mode }) => {
-                Some(format!("{} · {elapsed:.1?}", mode.label()))
+                Some(format!("{} · {elapsed:.1?}", tr(mode.label())))
             }
             _ => None,
         };
         let left_stats = [
             relation_rows,
             column_count.filter(|columns| *columns > 0).map(|columns| {
-                format!(
-                    "{columns} {}",
-                    if columns == 1 { "column" } else { "columns" }
-                )
+                if columns == 1 {
+                    trf!("{} column", columns)
+                } else {
+                    trf!("{} columns", columns)
+                }
             }),
         ]
         .into_iter()
@@ -1359,7 +1381,7 @@ impl Render for Workspace {
                         .children(refreshable_snapshot.then(|| {
                             button(
                                 "refresh-snapshot",
-                                "Refresh…",
+                                tr("Refresh…"),
                                 Tone::Quiet,
                                 Control::Compact,
                                 t,
@@ -1376,7 +1398,7 @@ impl Render for Workspace {
                         .children(show_result_actions.then(|| {
                             button(
                                 "copy-results",
-                                "Copy Results",
+                                tr("Copy Results"),
                                 Tone::Quiet,
                                 Control::Compact,
                                 t,
@@ -1393,17 +1415,23 @@ impl Render for Workspace {
                         // nothing. It also puts the format on screen, which
                         // a lone "Export" left to the file extension.
                         .children(show_result_actions.then(|| {
-                            button("export-csv", "Export CSV", Tone::Quiet, Control::Compact, t)
-                                .on_click(move |_, _, cx| {
-                                    _ = csv_workspace.update(cx, |workspace, cx| {
-                                        workspace.export_results(Format::Csv, cx);
-                                    });
-                                })
+                            button(
+                                "export-csv",
+                                tr("Export CSV"),
+                                Tone::Quiet,
+                                Control::Compact,
+                                t,
+                            )
+                            .on_click(move |_, _, cx| {
+                                _ = csv_workspace.update(cx, |workspace, cx| {
+                                    workspace.export_results(Format::Csv, cx);
+                                });
+                            })
                         }))
                         .children(show_result_actions.then(|| {
                             button(
                                 "export-json",
-                                "Export JSON",
+                                tr("Export JSON"),
                                 Tone::Quiet,
                                 Control::Compact,
                                 t,
@@ -1423,10 +1451,11 @@ impl Render for Workspace {
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .text_color(t.text_muted)
-                                .child(format!(
-                                    "{pending_count} pending {}",
-                                    if pending_count == 1 { "edit" } else { "edits" }
-                                ));
+                                .child(if pending_count == 1 {
+                                    trf!("{} pending edit", pending_count)
+                                } else {
+                                    trf!("{} pending edits", pending_count)
+                                });
                             // Behind Structure the grid is not drawn, and a
                             // walk over it would move a ring nobody sees.
                             if !grid_shown {
@@ -1444,7 +1473,7 @@ impl Render for Workspace {
                                         Control::Compact,
                                         t,
                                     )
-                                    .tooltip("Previous edit")
+                                    .tooltip(tr("Previous edit"))
                                     .on_click(
                                         move |_, window, cx| {
                                             _ = previous_workspace.update(cx, |workspace, cx| {
@@ -1462,7 +1491,7 @@ impl Render for Workspace {
                                         Control::Compact,
                                         t,
                                     )
-                                    .tooltip("Next edit")
+                                    .tooltip(tr("Next edit"))
                                     .on_click(
                                         move |_, window, cx| {
                                             _ = next_workspace.update(cx, |workspace, cx| {
@@ -1474,17 +1503,23 @@ impl Render for Workspace {
                                 .into_any_element()
                         }))
                         .children(has_pending.then(|| {
-                            button("discard-edits", "Discard", Tone::Quiet, Control::Compact, t)
-                                .on_click(move |_, window, cx| {
-                                    _ = discard_workspace.update(cx, |workspace, cx| {
-                                        workspace.discard_edits(&DiscardEdits, window, cx);
-                                    });
-                                })
+                            button(
+                                "discard-edits",
+                                tr("Discard"),
+                                Tone::Quiet,
+                                Control::Compact,
+                                t,
+                            )
+                            .on_click(move |_, window, cx| {
+                                _ = discard_workspace.update(cx, |workspace, cx| {
+                                    workspace.discard_edits(&DiscardEdits, window, cx);
+                                });
+                            })
                         }))
                         .children(has_pending.then(|| {
                             button(
                                 "apply-edits",
-                                "Apply edits",
+                                tr("Apply edits"),
                                 Tone::Primary,
                                 Control::Compact,
                                 t,
@@ -1634,14 +1669,14 @@ impl Render for Workspace {
                     let silenced = profile
                         .confirmed
                         .iter()
-                        .map(|kind| kind.label())
-                        .chain(profile.confirmed_stale.then_some("stale rows"))
+                        .map(|kind| tr(kind.label()))
+                        .chain(profile.confirmed_stale.then_some(tr("stale rows")))
                         .collect::<Vec<_>>();
                     ui::mode_pill(t, mode)
                         .dropdown_menu(move |menu, _, _| {
                             let menu = Mode::ALL.into_iter().fold(menu, |menu, option| {
                                 menu.menu_with_check(
-                                    option.label(),
+                                    tr(option.label()),
                                     option == mode,
                                     Box::new(SetMode { mode: option }),
                                 )
@@ -1655,10 +1690,7 @@ impl Render for Workspace {
                                 menu
                             } else {
                                 menu.separator().menu(
-                                    format!(
-                                        "Reset silenced confirmations ({})",
-                                        silenced.join(", ")
-                                    ),
+                                    trf!("Reset silenced confirmations ({})", silenced.join(", ")),
                                     Box::new(ResetConfirmations),
                                 )
                             }
@@ -1672,13 +1704,10 @@ impl Render for Workspace {
                         .ml_auto()
                         .child(ui::update_pill(t, &release.version).dropdown_menu(
                             move |menu, _, _| {
-                                menu.label("Update it with your package manager,")
-                                    .label("or download it from GitHub.")
+                                menu.label(tr("Update it with your package manager,"))
+                                    .label(tr("or download it from GitHub."))
                                     .separator()
-                                    .link(
-                                        format!("Download {}", release.version),
-                                        release.url.clone(),
-                                    )
+                                    .link(trf!("Download {}", release.version), release.url.clone())
                             },
                         ))
                         .into_any_element()
@@ -1706,7 +1735,7 @@ impl Render for Workspace {
                         Control::Compact,
                         t,
                     )
-                    .tooltip("Settings")
+                    .tooltip(tr("Settings"))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(OpenSettings), cx);
                     })

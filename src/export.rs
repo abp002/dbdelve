@@ -9,7 +9,10 @@ use std::{collections::HashSet, path::Path};
 
 use serde::Deserialize;
 
-use crate::db::{Cell, Column, EditTarget, Engine, MISSING, QueryResult, Syntax};
+use crate::{
+    db::{Cell, Column, EditTarget, Engine, MISSING, QueryResult, Syntax},
+    i18n::tr,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -68,9 +71,9 @@ impl RowsAs {
 
     pub fn label(self) -> &'static str {
         match self {
-            RowsAs::Text => "Text",
+            RowsAs::Text => tr("Text"),
             RowsAs::Csv => "CSV",
-            RowsAs::CsvWithHeader => "CSV with Header",
+            RowsAs::CsvWithHeader => tr("CSV with Header"),
             RowsAs::Json => "JSON",
             RowsAs::InsertSql => "INSERT SQL",
         }

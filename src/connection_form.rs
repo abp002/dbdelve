@@ -15,6 +15,7 @@ use crate::{
     db::{
         ConnectionConfig, Engine, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
     },
+    i18n::{tr, trf},
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
@@ -111,11 +112,12 @@ impl ConnectionForm {
             _ => None,
         };
 
-        let url =
-            cx.new(|cx| InputState::new(window, cx).placeholder("postgresql://…  or  sqlite://…"));
+        let url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr("postgresql://…  or  sqlite://…"))
+        });
         let name = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Display name")
+                .placeholder(tr("Display name"))
                 .default_value(value(
                     server
                         .map(|server| server.database.as_str())
@@ -125,12 +127,12 @@ impl ConnectionForm {
         });
         let path = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Database file")
+                .placeholder(tr("Database file"))
                 .default_value(value(file))
         });
         let host = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Host (optional)")
+                .placeholder(tr("Host (optional)"))
                 .default_value(value(
                     server
                         .map(|server| server.host.as_str())
@@ -139,7 +141,7 @@ impl ConnectionForm {
         });
         let port = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Port (optional)")
+                .placeholder(tr("Port (optional)"))
                 .default_value(
                     server
                         .and_then(|server| server.port)
@@ -149,7 +151,7 @@ impl ConnectionForm {
         });
         let database = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Database")
+                .placeholder(tr("Database"))
                 .default_value(value(
                     server
                         .map(|server| server.database.as_str())
@@ -158,7 +160,7 @@ impl ConnectionForm {
         });
         let user = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Username")
+                .placeholder(tr("Username"))
                 .default_value(value(
                     server
                         .map(|server| server.user.as_str())
@@ -167,14 +169,14 @@ impl ConnectionForm {
         });
         let password = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Password (optional)")
+                .placeholder(tr("Password (optional)"))
                 .default_value(value(server.map(|server| server.password.as_str())))
                 .masked(true)
         });
 
         let root_certificate = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Root certificate file (optional)")
+                .placeholder(tr("Root certificate file (optional)"))
                 .default_value(value(
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
@@ -188,41 +190,41 @@ impl ConnectionForm {
                     .default_value(value)
             })
         };
-        let ssh_host = input("Host or ~/.ssh/config alias", ssh_host);
-        let ssh_port = input("Port (optional)", ssh_port);
-        let ssh_user = input("Username (optional)", ssh_user);
-        let ssh_identity_file = input("Identity file (optional)", ssh_identity_file);
+        let ssh_host = input(tr("Host or ~/.ssh/config alias"), ssh_host);
+        let ssh_port = input(tr("Port (optional)"), ssh_port);
+        let ssh_user = input(tr("Username (optional)"), ssh_user);
+        let ssh_identity_file = input(tr("Identity file (optional)"), ssh_identity_file);
         let account_name = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Account identifier")
+                .placeholder(tr("Account identifier"))
                 .default_value(value(account.map(|account| account.account.as_str())))
         });
         let private_key = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Absolute path to the private key file")
+                .placeholder(tr("Absolute path to the private key file"))
                 .default_value(value(account.map(|account| account.private_key.as_str())))
         });
         let warehouse = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Warehouse (optional)")
+                .placeholder(tr("Warehouse (optional)"))
                 .default_value(value(
                     account.and_then(|account| account.warehouse.as_deref()),
                 ))
         });
         let role = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Role (optional)")
+                .placeholder(tr("Role (optional)"))
                 .default_value(value(account.and_then(|account| account.role.as_deref())))
         });
         let options = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("authSource=admin&replicaSet=rs0 (optional)")
+                .placeholder(tr("authSource=admin&replicaSet=rs0 (optional)"))
                 .default_value(value(mongo.map(|mongo| mongo.options.as_str())))
         });
-        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Project name")));
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Seconds (0 for no limit)")
+                .placeholder(tr("Seconds (0 for no limit)"))
                 .default_value(
                     config
                         .map(ConnectionConfig::statement_timeout)
@@ -327,7 +329,7 @@ impl ConnectionForm {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let name = read(&self.name);
         if name.is_empty() {
-            return Err("Display name is required.".into());
+            return Err(tr("Display name is required.").into());
         }
 
         let statement_timeout = self.statement_timeout(cx)?;
@@ -335,7 +337,7 @@ impl ConnectionForm {
             Engine::Sqlite => {
                 let path = read(&self.path);
                 if path.is_empty() {
-                    return Err("Database file is required.".into());
+                    return Err(tr("Database file is required.").into());
                 }
                 ConnectionConfig::Sqlite {
                     path,
@@ -374,7 +376,7 @@ impl ConnectionForm {
         }
         value
             .parse()
-            .map_err(|_| "Statement timeout must be a whole number of seconds.".to_string())
+            .map_err(|_| tr("Statement timeout must be a whole number of seconds.").to_string())
     }
 
     pub(crate) fn account(&self, cx: &App) -> Result<SnowflakeConfig, String> {
@@ -393,14 +395,14 @@ impl ConnectionForm {
             ("Database", &database),
         ] {
             if value.is_empty() {
-                return Err(format!("{label} is required."));
+                return Err(trf!("{} is required.", tr(label)));
             }
         }
         // Absolute, because a relative one resolves against wherever the app
         // was launched from -- `/` for one opened from Finder -- and `~` is the
         // shell's to expand, not the file system's.
         if !private_key.starts_with('/') {
-            return Err("Private key must be an absolute path to the key file.".into());
+            return Err(tr("Private key must be an absolute path to the key file.").into());
         }
 
         Ok(SnowflakeConfig {
@@ -435,11 +437,11 @@ impl ConnectionForm {
         // what a profile that moves between databases starts on.
         for (label, value) in [("Host", &host), ("Username", &user)] {
             if value.is_empty() && (label == "Host" || required.contains(&label)) {
-                return Err(format!("{label} is required."));
+                return Err(trf!("{} is required.", tr(label)));
             }
         }
 
-        let port = parse_port("Port", &port)?;
+        let port = parse_port(tr("Port"), &port)?;
 
         // Kept only where it is consulted. A path left behind by switching down
         // to `require` would be stored and shown as though it were in force.
@@ -492,10 +494,10 @@ fn ssh_tunnel(
         return Ok(None);
     }
     if host.is_empty() {
-        return Err("SSH host is required.".into());
+        return Err(tr("SSH host is required.").into());
     }
     if host.starts_with('-') {
-        return Err("SSH host must not start with '-'.".into());
+        return Err(tr("SSH host must not start with '-'.").into());
     }
     let identity_file = Some(identity_file).filter(|path| !path.is_empty());
     if let Some(error) = identity_file
@@ -506,7 +508,7 @@ fn ssh_tunnel(
     }
     Ok(Some(SshTunnel {
         host,
-        port: parse_port("SSH port", &port)?,
+        port: parse_port(tr("SSH port"), &port)?,
         user,
         identity_file,
     }))
@@ -518,7 +520,7 @@ fn parse_port(label: &str, value: &str) -> Result<Option<u16>, String> {
         return Ok(None);
     }
     match value.parse() {
-        Ok(0) | Err(_) => Err(format!("{label} must be a number from 1 to 65535.")),
+        Ok(0) | Err(_) => Err(trf!("{} must be a number from 1 to 65535.", label)),
         Ok(port) => Ok(Some(port)),
     }
 }
@@ -556,8 +558,8 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
 pub(crate) fn duplicate_profile_name(name: &str, existing: &[String]) -> String {
     (1..)
         .map(|n| match n {
-            1 => format!("{name} copy"),
-            n => format!("{name} copy {n}"),
+            1 => trf!("{} copy", name),
+            n => trf!("{} copy {}", name, n),
         })
         .find(|candidate| !existing.contains(candidate))
         .expect("an unbounded range always finds a free name")

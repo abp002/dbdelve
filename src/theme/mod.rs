@@ -23,7 +23,7 @@ pub mod color;
 
 use gpui::{App, Window};
 
-use crate::store;
+use crate::{i18n::tr, store};
 
 use color::{Oklch, Rgba, Srgb};
 use gpui_component::{
@@ -390,13 +390,13 @@ impl ConnectionColor {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Gray => "Gray",
-            Self::Red => "Red",
-            Self::Orange => "Orange",
-            Self::Yellow => "Yellow",
-            Self::Green => "Green",
-            Self::Blue => "Blue",
-            Self::Purple => "Purple",
+            Self::Gray => tr("Gray"),
+            Self::Red => tr("Red"),
+            Self::Orange => tr("Orange"),
+            Self::Yellow => tr("Yellow"),
+            Self::Green => tr("Green"),
+            Self::Blue => tr("Blue"),
+            Self::Purple => tr("Purple"),
         }
     }
 

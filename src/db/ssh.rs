@@ -14,6 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::{DbError, ServerConfig, SshTunnel, plain_error};
+use crate::i18n::{tr, trf};
 
 /// Long enough for a hardware key waiting on a touch.
 const READY_WITHIN: Duration = Duration::from_secs(30);
@@ -76,8 +77,9 @@ impl Tunnel {
             let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
                 .and_then(|listener| listener.local_addr())
                 .map_err(|error| {
-                    plain_error(format!(
-                        "Could not reserve a local port for the SSH tunnel: {error}"
+                    plain_error(trf!(
+                        "Could not reserve a local port for the SSH tunnel: {}",
+                        error
                     ))
                 })?
                 .port();
@@ -102,7 +104,7 @@ impl Tunnel {
             let mut tunnel =
                 spawn(local, &ssh.host, &args).map_err(|error| match error.kind() {
                     io::ErrorKind::NotFound => no_ssh(),
-                    _ => plain_error(format!("Could not start ssh: {error}")),
+                    _ => plain_error(trf!("Could not start ssh: {}", error)),
                 })?;
             let process = tunnel
                 .process
@@ -126,7 +128,7 @@ impl Tunnel {
                     return Err(failure(&ssh.host, status, &said));
                 }
                 Ready::TimedOut => {
-                    return Err(plain_error(format!(
+                    return Err(plain_error(trf!(
                         "SSH tunnel through {} did not come up within {} seconds.",
                         ssh.host,
                         READY_WITHIN.as_secs()
@@ -151,9 +153,9 @@ impl Tunnel {
         }
         let said = self.shown();
         Err(plain_error(if said.is_empty() {
-            format!("SSH tunnel through {} closed.", self.host)
+            trf!("SSH tunnel through {} closed.", self.host)
         } else {
-            format!("SSH tunnel through {} closed: {said}", self.host)
+            trf!("SSH tunnel through {} closed: {}", self.host, said)
         }))
     }
 
@@ -168,9 +170,12 @@ impl Tunnel {
                     .map(|(_, reason)| reason.to_owned())
             });
             if let Some(reason) = reason {
-                error.message = format!(
-                    "{}\nSSH tunnel through {}: {OPEN_FAILED}{reason}",
-                    error.message, self.host
+                error.message = trf!(
+                    "{}\nSSH tunnel through {}: {}{}",
+                    error.message,
+                    self.host,
+                    OPEN_FAILED,
+                    reason
                 );
                 return error;
             }
@@ -241,7 +246,7 @@ fn ssh_args(
     target_port: u16,
 ) -> Result<Vec<String>, DbError> {
     if ssh.host.starts_with('-') {
-        return Err(plain_error(format!(
+        return Err(plain_error(trf!(
             "SSH host {} starts with '-', which ssh would read as an option.",
             ssh.host
         )));
@@ -355,16 +360,18 @@ fn failure(host: &str, status: ExitStatus, said: &str) -> DbError {
         return no_ssh();
     }
     if said.is_empty() {
-        plain_error(format!(
-            "SSH tunnel through {host} failed: ssh exited ({status})."
+        plain_error(trf!(
+            "SSH tunnel through {} failed: ssh exited ({}).",
+            host,
+            status
         ))
     } else {
-        plain_error(format!("SSH tunnel through {host} failed: {said}"))
+        plain_error(trf!("SSH tunnel through {} failed: {}", host, said))
     }
 }
 
 fn no_ssh() -> DbError {
-    plain_error("No ssh executable was found.".to_owned())
+    plain_error(tr("No ssh executable was found.").to_owned())
 }
 
 /// Reads stderr to the end, so ssh never blocks on a full pipe, a line at a

@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 
+use crate::i18n::{tr, trf};
 use rustls::{
     ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -83,15 +84,17 @@ impl SslMode {
     /// encrypt without checking who answered.
     pub fn explanation(self) -> &'static str {
         match self {
-            Self::Disable => "Never encrypted.",
-            Self::Prefer => "Encrypted when the server offers it. The certificate is not checked.",
-            Self::Require => "Always encrypted. The certificate is not checked.",
-            Self::VerifyCa => {
-                "The certificate must be signed by a trusted authority. Its host name is not checked."
+            Self::Disable => tr("Never encrypted."),
+            Self::Prefer => {
+                tr("Encrypted when the server offers it. The certificate is not checked.")
             }
-            Self::VerifyFull => {
-                "The certificate must be signed by a trusted authority and issued for this host."
-            }
+            Self::Require => tr("Always encrypted. The certificate is not checked."),
+            Self::VerifyCa => tr(
+                "The certificate must be signed by a trusted authority. Its host name is not checked.",
+            ),
+            Self::VerifyFull => tr(
+                "The certificate must be signed by a trusted authority and issued for this host.",
+            ),
         }
     }
 
@@ -110,11 +113,11 @@ impl SslMode {
             // driver has no way to express that order, and treating it as
             // `prefer` would reverse it — quietly preferring the opposite
             // thing to the one that was asked for.
-            "allow" => Err(
-                "sslmode=allow is not supported: the driver cannot try plaintext before TLS."
-                    .to_string(),
-            ),
-            other => Err(format!("sslmode={other} is not an SSL mode.")),
+            "allow" => Err(tr(
+                "sslmode=allow is not supported: the driver cannot try plaintext before TLS.",
+            )
+            .to_string()),
+            other => Err(trf!("sslmode={} is not an SSL mode.", other)),
         }
     }
 
@@ -155,7 +158,7 @@ pub fn connector(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let versions = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
-        .map_err(|error| format!("Could not configure TLS: {error}"))?;
+        .map_err(|error| trf!("Could not configure TLS: {}", error))?;
 
     let config = match mode {
         // The one mode that needs nothing written for it, and deliberately the
@@ -199,24 +202,25 @@ fn roots(root_certificate: Option<&str>) -> Result<RootCertStore, String> {
         }
         if store.is_empty() {
             return Err(match loaded.errors.first() {
-                Some(error) => format!("Could not read the system certificates: {error}"),
-                None => "The system holds no certificate authorities.".to_string(),
+                Some(error) => trf!("Could not read the system certificates: {}", error),
+                None => tr("The system holds no certificate authorities.").to_string(),
             });
         }
         return Ok(store);
     };
 
     let file =
-        std::fs::File::open(path).map_err(|error| format!("Could not read {path}: {error}"))?;
+        std::fs::File::open(path).map_err(|error| trf!("Could not read {}: {}", path, error))?;
     let mut reader = std::io::BufReader::new(file);
     for certificate in rustls_pemfile::certs(&mut reader) {
-        let certificate = certificate.map_err(|error| format!("Could not read {path}: {error}"))?;
+        let certificate =
+            certificate.map_err(|error| trf!("Could not read {}: {}", path, error))?;
         store
             .add(certificate)
-            .map_err(|error| format!("{path} does not hold a usable certificate: {error}"))?;
+            .map_err(|error| trf!("{} does not hold a usable certificate: {}", path, error))?;
     }
     if store.is_empty() {
-        return Err(format!("{path} holds no certificates."));
+        return Err(trf!("{} holds no certificates.", path));
     }
     Ok(store)
 }

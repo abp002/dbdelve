@@ -46,6 +46,7 @@ use super::{
     NamedDefinition, QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode,
     Statistics, Structure, plain_error,
 };
+use crate::i18n::{tr, trf};
 use crate::mql::{self, Arg, Call, CursorMethod, DbMethod, Method, Show, Target, Value};
 
 /// The port the server listens on when the profile does not say.
@@ -155,8 +156,10 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
         let flag = || match value.to_ascii_lowercase().as_str() {
             "true" => Ok(true),
             "false" => Ok(false),
-            _ => Err(format!(
-                "Connection URL parameter {key}={value} is not true or false."
+            _ => Err(trf!(
+                "Connection URL parameter {}={} is not true or false.",
+                key,
+                value
             )),
         };
         match key.to_ascii_lowercase().as_str() {
@@ -165,8 +168,9 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
             "tlsallowinvalidhostnames" => any_name |= flag()?,
             "tlscafile" => root_certificate = Some(value).filter(|path| !path.is_empty()),
             lowered if lowered.starts_with("tls") => {
-                return Err(format!(
-                    "Connection URL parameter {key} is not one dbdelve can pass to MongoDB."
+                return Err(trf!(
+                    "Connection URL parameter {} is not one dbdelve can pass to MongoDB.",
+                    key
                 ));
             }
             _ => passed.push(pair),
@@ -178,7 +182,7 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
         true => address.clone(),
         false => format!("{address}?{options}"),
     })
-    .map_err(|error| format!("Connection URL is invalid: {}", error.kind))?;
+    .map_err(|error| trf!("Connection URL is invalid: {}", error.kind))?;
 
     let (host, port, srv) = match parsed.host_info {
         HostInfo::DnsRecord(name) => (name, None, true),
@@ -187,15 +191,15 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
             // As written: the driver unbrackets an IPv6 seed, and a list needs
             // the brackets back to read its ports.
             [_, _, ..] => (seeds_as_written(&address), None, false),
-            _ => return Err("Connection URL does not name a host and port.".into()),
+            _ => return Err(tr("Connection URL does not name a host and port.").into()),
         },
-        _ => return Err("Connection URL does not name a host.".into()),
+        _ => return Err(tr("Connection URL does not name a host.").into()),
     };
 
     let tls_keys = unchecked || any_name || root_certificate.is_some();
     let sslmode = match tls {
         Some(false) if tls_keys => {
-            return Err("Connection URL sets tls=false beside options for TLS.".into());
+            return Err(tr("Connection URL sets tls=false beside options for TLS.").into());
         }
         Some(false) => SslMode::Disable,
         // A seed list's TLS is off unless asked for, and dbdelve's default
@@ -247,14 +251,15 @@ fn connection_string(config: &MongoConfig) -> Result<String, DbError> {
     let host = server.host.trim();
     if host.is_empty() || host.contains(['@', '/', '?', '#']) || host.contains(char::is_whitespace)
     {
-        return Err(plain_error(format!(
-            "Host {host} is not a host name or a list of them."
+        return Err(plain_error(trf!(
+            "Host {} is not a host name or a list of them.",
+            host
         )));
     }
     let hosts = match (config.srv || config.seed_list(), server.port) {
         (true, Some(_)) => {
             return Err(plain_error(
-                "A port belongs in the host list for a seed list, and an SRV name takes none."
+                tr("A port belongs in the host list for a seed list, and an SRV name takes none.")
                     .into(),
             ));
         }
@@ -302,16 +307,18 @@ fn owned_option(options: &str, tunnelled: bool) -> Option<String> {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             let lowered = key.to_ascii_lowercase();
             if lowered.starts_with("tls") || lowered == "ssl" {
-                Some(format!(
-                    "Options sets {key}, which the Encryption setting decides on MongoDB."
+                Some(trf!(
+                    "Options sets {}, which the Encryption setting decides on MongoDB.",
+                    key
                 ))
             } else if tunnelled
                 && lowered == "directconnection"
                 && !value.eq_ignore_ascii_case("true")
             {
-                Some(format!(
-                    "Options sets {key}={value}, but an SSH tunnel reaches one server, so the \
-                     connection through it is direct."
+                Some(trf!(
+                    "Options sets {}={}, but an SSH tunnel reaches one server, so the connection through it is direct.",
+                    key,
+                    value
                 ))
             } else {
                 None
@@ -365,16 +372,13 @@ fn unreachable_through_a_tunnel(config: &MongoConfig) -> Option<DbError> {
     server.ssh.as_ref()?;
     if config.srv || config.seed_list() {
         return Some(plain_error(
-            "A seed list or an SRV name cannot be reached through an SSH tunnel: the tunnel \
-             forwards one port to one server."
+            tr("A seed list or an SRV name cannot be reached through an SSH tunnel: the tunnel forwards one port to one server.")
                 .into(),
         ));
     }
     server.sslmode.checks_certificate().then(|| {
-        plain_error(format!(
-            "sslmode={} cannot be honoured through an SSH tunnel on MongoDB: the driver checks \
-             the certificate against the address it dials, which is the tunnel's loopback \
-             address rather than {}.",
+        plain_error(trf!(
+            "sslmode={} cannot be honoured through an SSH tunnel on MongoDB: the driver checks the certificate against the address it dials, which is the tunnel's loopback address rather than {}.",
             server.sslmode.as_str(),
             server.host
         ))
@@ -433,7 +437,7 @@ impl Connection {
             .thread_name("dbdelve-mongodb")
             .enable_all()
             .build()
-            .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
+            .map_err(|error| plain_error(trf!("Could not start the connection: {}", error)))?;
 
         tunnelled(server, DEFAULT_PORT, |tunnel| {
             let dial = tunnel.as_deref().map(Tunnel::dial).transpose()?;
@@ -513,8 +517,9 @@ impl Connection {
                     )
                     .await
                     .map_err(|_| {
-                        plain_error(format!(
-                            "Stopped after the statement timeout of {seconds} seconds."
+                        plain_error(trf!(
+                            "Stopped after the statement timeout of {} seconds.",
+                            seconds
                         ))
                     })?,
                 };
@@ -541,7 +546,7 @@ impl Connection {
                 .map_err(|error| match at {
                     0 => error,
                     1 => DbError {
-                        message: format!(
+                        message: trf!(
                             "Statement 2 of {} failed after statement 1 had run: {}",
                             statements.len(),
                             error.message
@@ -549,10 +554,11 @@ impl Connection {
                         ..error
                     },
                     ran => DbError {
-                        message: format!(
-                            "Statement {} of {} failed after statements 1 to {ran} had run: {}",
+                        message: trf!(
+                            "Statement {} of {} failed after statements 1 to {} had run: {}",
                             ran + 1,
                             statements.len(),
+                            ran,
                             error.message
                         ),
                         ..error
@@ -621,7 +627,7 @@ impl Connection {
             Ok(())
         })
         .map_err(|error| {
-            plain_error(format!(
+            plain_error(trf!(
                 "Could not ask the server to cancel: {}",
                 error.message
             ))
@@ -632,7 +638,7 @@ impl Connection {
     fn named(&self, database: Option<&str>) -> Result<Database, DbError> {
         match database.unwrap_or(&self.database) {
             "" => Err(plain_error(
-                "No database is selected, so `db` names none.".into(),
+                tr("No database is selected, so `db` names none.").into(),
             )),
             name => Ok(self.client().database(name)),
         }
@@ -691,10 +697,10 @@ impl Connection {
                 let sent = match args.bson(0)? {
                     Some(Bson::String(name)) => doc! { name: 1 },
                     Some(Bson::Document(sent)) => sent,
-                    _ => return Err(args.not(0, "a command document")),
+                    _ => return Err(args.not(0, tr("a command document"))),
                 };
                 if args.value(1).is_some() {
-                    return Err(plain_error(format!(
+                    return Err(plain_error(trf!(
                         "{} takes the command document alone here.",
                         args.method
                     )));
@@ -1063,7 +1069,7 @@ impl Connection {
                             Some("after") => sent.insert("new", true),
                             Some("before") => sent.insert("new", false),
                             _ => {
-                                return Err(plain_error(format!(
+                                return Err(plain_error(trf!(
                                     "{}'s returnDocument is \"before\" or \"after\".",
                                     args.method
                                 )));
@@ -1346,7 +1352,7 @@ impl Connection {
         listed
             .into_iter()
             .next()
-            .ok_or_else(|| plain_error(format!("{schema} has no collection {relation}.")))
+            .ok_or_else(|| plain_error(trf!("{} has no collection {}.", schema, relation)))
     }
 
     fn indexes(&self, database: &Database, relation: &str) -> Result<Vec<Document>, DbError> {
@@ -1693,21 +1699,32 @@ fn connect_error(error: &Error, config: &MongoConfig, tls: bool) -> DbError {
     plain_error(match &*error.kind {
         ErrorKind::Io(io) => match io.kind() {
             std::io::ErrorKind::ConnectionRefused => {
-                format!("Connection refused: nothing is listening on {endpoint}")
+                trf!("Connection refused: nothing is listening on {}", endpoint)
             }
             std::io::ErrorKind::TimedOut => {
-                format!("No answer from {endpoint} within {CONNECT_TIMEOUT_SECONDS} seconds.")
+                trf!(
+                    "No answer from {} within {} seconds.",
+                    endpoint,
+                    CONNECT_TIMEOUT_SECONDS
+                )
             }
             std::io::ErrorKind::UnexpectedEof if tls => {
-                format!("{endpoint} closed the connection during the TLS handshake.")
+                trf!(
+                    "{} closed the connection during the TLS handshake.",
+                    endpoint
+                )
             }
             _ if tls && tls_not_offered(error) => {
-                format!("The TLS handshake with {endpoint} failed: {io}")
+                trf!("The TLS handshake with {} failed: {}", endpoint, io)
             }
             _ => format!("{endpoint}: {io}"),
         },
         ErrorKind::ServerSelection { .. } => {
-            format!("No server at {endpoint} answered within {CONNECT_TIMEOUT_SECONDS} seconds.")
+            trf!(
+                "No server at {} answered within {} seconds.",
+                endpoint,
+                CONNECT_TIMEOUT_SECONDS
+            )
         }
         kind => kind.to_string(),
     })
@@ -1722,7 +1739,7 @@ fn guarded<T>(call: impl FnOnce() -> T) -> Result<T, DbError> {
             .map(|text| text.to_string())
             .or_else(|| panic.downcast_ref::<String>().cloned())
             .unwrap_or_default();
-        plain_error(format!("The MongoDB driver failed: {detail}"))
+        plain_error(trf!("The MongoDB driver failed: {}", detail))
     })
 }
 
@@ -1762,7 +1779,7 @@ impl<'a> Run<'a> {
         };
         match asked {
             // Cancel landed between two statements of one submission.
-            true => Err(plain_error("Cancelled before it was sent.".into())),
+            true => Err(plain_error(tr("Cancelled before it was sent.").into())),
             false => Ok(run),
         }
     }
@@ -1807,7 +1824,7 @@ impl<'a> Run<'a> {
                     outcome = operation(session).into_future() => {
                         Some(outcome.map_err(|error| plain_error(error.kind.to_string())))
                     }
-                    Ok(()) = stopped => Some(Err(plain_error("Cancelled.".into()))),
+                    Ok(()) = stopped => Some(Err(plain_error(tr("Cancelled.").into()))),
                     () = bound => None,
                 }
             })
@@ -1816,8 +1833,9 @@ impl<'a> Run<'a> {
             // What the server's own bound did not stop, or a command that
             // carries none, is stopped the way Cancel stops it.
             let _ = connection.kill(handle);
-            Err(plain_error(format!(
-                "Stopped after the statement timeout of {timeout} seconds."
+            Err(plain_error(trf!(
+                "Stopped after the statement timeout of {} seconds.",
+                timeout
             )))
         })
     }
@@ -1864,14 +1882,14 @@ fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbEr
         .and_then(|errors| errors.first())
         .and_then(Bson::as_document)
     {
-        let message = error.get_str("errmsg").unwrap_or("A write failed.");
+        let message = error.get_str("errmsg").unwrap_or(tr("A write failed."));
         return Err(plain_error(match number(written.get("n")) {
             0 => message.to_string(),
-            n => format!("{message} The statement's other writes applied: {n}."),
+            n => trf!("{} The statement's other writes applied: {}.", message, n),
         }));
     }
     if let Ok(error) = written.get_document("writeConcernError") {
-        return Err(plain_error(format!(
+        return Err(plain_error(trf!(
             "The writes applied, but their write concern failed: {}",
             error.get_str("errmsg").unwrap_or_default()
         )));
@@ -1920,7 +1938,7 @@ fn chained(
             | CursorMethod::Limit
             | CursorMethod::Skip
             | CursorMethod::Projection => {
-                return Err(plain_error(format!(
+                return Err(plain_error(trf!(
                     "aggregate's cursor has no {}(); a pipeline stage does that.",
                     args.method
                 )));
@@ -1934,7 +1952,7 @@ fn chained(
                     None | Some(Bson::Boolean(false)) => "queryPlanner".into(),
                     Some(Bson::Boolean(true)) => "allPlansExecution".into(),
                     Some(verbosity @ Bson::String(_)) => verbosity,
-                    Some(_) => return Err(args.not(0, "a verbosity")),
+                    Some(_) => return Err(args.not(0, tr("a verbosity"))),
                 });
                 continue;
             }
@@ -1942,9 +1960,10 @@ fn chained(
         };
         // Set both ways, one would silently replace the other.
         if preset.iter().any(|key| key == field) {
-            return Err(plain_error(format!(
-                "{}() sets {field}, which the statement already sets.",
-                args.method
+            return Err(plain_error(trf!(
+                "{}() sets {}, which the statement already sets.",
+                args.method,
+                field
             )));
         }
         sent.insert(field, args.required(0)?);
@@ -2013,16 +2032,13 @@ fn operators(method: Method, update: &Bson) -> Result<(), DbError> {
     let replacement =
         matches!(update, Bson::Document(fields) if !fields.keys().any(|key| key.starts_with('$')));
     match method {
-        Method::ReplaceOne | Method::FindOneAndReplace if !replacement => {
-            Err(plain_error(format!(
-                "{}'s replacement holds update operators; updateOne applies them.",
-                method.name()
-            )))
-        }
+        Method::ReplaceOne | Method::FindOneAndReplace if !replacement => Err(plain_error(trf!(
+            "{}'s replacement holds update operators; updateOne applies them.",
+            method.name()
+        ))),
         Method::UpdateOne | Method::UpdateMany | Method::FindOneAndUpdate if !operators => {
-            Err(plain_error(format!(
-                "{}'s update is not all update operators ($set, $inc, …), so it would replace \
-                 the document; replaceOne does that.",
+            Err(plain_error(trf!(
+                "{}'s update is not all update operators ($set, $inc, …), so it would replace the document; replaceOne does that.",
                 method.name()
             )))
         }
@@ -2096,7 +2112,13 @@ impl<'a> Args<'a> {
     }
 
     fn required(&self, index: usize) -> Result<Bson, DbError> {
-        self.bson(index)?.ok_or_else(|| self.not(index, "given"))
+        self.bson(index)?.ok_or_else(|| {
+            plain_error(trf!(
+                "{}'s argument {} is not given.",
+                self.method,
+                index + 1
+            ))
+        })
     }
 
     /// An optional document, where `null` is as good as leaving it out.
@@ -2104,13 +2126,13 @@ impl<'a> Args<'a> {
         match self.bson(index)? {
             None | Some(Bson::Null) => Ok(None),
             Some(Bson::Document(document)) => Ok(Some(document)),
-            Some(_) => Err(self.not(index, "a document")),
+            Some(_) => Err(self.not(index, tr("a document"))),
         }
     }
 
     fn required_document(&self, index: usize) -> Result<Document, DbError> {
         self.document(index)?
-            .ok_or_else(|| self.not(index, "a document"))
+            .ok_or_else(|| self.not(index, tr("a document")))
     }
 
     fn documents(&self, index: usize) -> Result<Vec<Document>, DbError> {
@@ -2119,10 +2141,10 @@ impl<'a> Args<'a> {
                 .into_iter()
                 .map(|value| match value {
                     Bson::Document(document) => Ok(document),
-                    _ => Err(self.not(index, "an array of documents")),
+                    _ => Err(self.not(index, tr("an array of documents"))),
                 })
                 .collect(),
-            _ => Err(self.not(index, "an array of documents")),
+            _ => Err(self.not(index, tr("an array of documents"))),
         }
     }
 
@@ -2137,15 +2159,16 @@ impl<'a> Args<'a> {
     fn string(&self, index: usize) -> Result<String, DbError> {
         match self.bson(index)? {
             Some(Bson::String(text)) => Ok(text),
-            _ => Err(self.not(index, "a string")),
+            _ => Err(self.not(index, tr("a string"))),
         }
     }
 
     fn not(&self, index: usize, what: &str) -> DbError {
-        plain_error(format!(
-            "{}'s argument {} is not {what}.",
+        plain_error(trf!(
+            "{}'s argument {} is not {}.",
             self.method,
-            index + 1
+            index + 1,
+            what
         ))
     }
 }
@@ -2162,11 +2185,13 @@ fn merged(
 ) -> Result<(), DbError> {
     for (key, value) in options {
         if !takes.contains(&key.as_str()) {
-            return Err(plain_error(format!("{method} takes no option {key}.")));
+            return Err(plain_error(trf!("{} takes no option {}.", method, key)));
         }
         if sent.contains_key(&key) {
-            return Err(plain_error(format!(
-                "{method}'s option {key} is one the statement already sets."
+            return Err(plain_error(trf!(
+                "{}'s option {} is one the statement already sets.",
+                method,
+                key
             )));
         }
         sent.insert(key, value);
@@ -2207,7 +2232,7 @@ fn bson(value: &Value) -> Result<Bson, DbError> {
         Value::Double(n) => Bson::Double(*n),
         Value::Decimal128(text) => Bson::Decimal128(
             text.parse()
-                .map_err(|_| plain_error(format!("{text} does not fit in a Decimal128.")))?,
+                .map_err(|_| plain_error(trf!("{} does not fit in a Decimal128.", text)))?,
         ),
         Value::String(text) => Bson::String(text.clone()),
         Value::ObjectId(bytes) => {

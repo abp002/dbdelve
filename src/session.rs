@@ -31,6 +31,7 @@ use crate::{
         Conjunction, FilterBar, FilterRow, applied_filters, filter_bars, restored_filter,
         stored_filter,
     },
+    i18n::tr,
     result_grid,
     result_grid::{NewValue, ResultGrid},
     sql::{Destructive, Mode, SortKey, Verdict},
@@ -367,7 +368,7 @@ impl Session {
         cx: &mut Context<Workspace>,
     ) -> Self {
         let explorer_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter database objects…"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr("Filter database objects…")));
         cx.subscribe(&explorer_filter, {
             let id = id.clone();
             move |workspace, _, event: &InputEvent, cx| {
@@ -378,7 +379,7 @@ impl Session {
         })
         .detach();
 
-        let save_name = cx.new(|cx| InputState::new(window, cx).placeholder("Query name"));
+        let save_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Query name")));
         // Subscribed with the window, because confirming a save can swap the
         // editor's buffer and that cannot be done without one.
         cx.subscribe_in(

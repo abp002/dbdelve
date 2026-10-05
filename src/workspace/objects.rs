@@ -6,6 +6,7 @@
 use super::*;
 
 use crate::db::ColumnDefinition;
+use crate::i18n::{tr, trf};
 use crate::session::{Finished, Queue, TabKey};
 
 impl Workspace {
@@ -226,7 +227,7 @@ impl Workspace {
             // a filter refused every time.
             *stale = false;
             self.note(
-                "dbdelve will not run a filter it cannot read as one query.".into(),
+                tr("dbdelve will not run a filter it cannot read as one query.").into(),
                 cx,
             );
             return;
@@ -264,7 +265,7 @@ impl Workspace {
             return;
         };
         let Some(connection) = profile.connection() else {
-            self.note("The connection is not open.".into(), cx);
+            self.note(tr("The connection is not open.").into(), cx);
             return;
         };
         let (profile_id, generation, mode) = (profile.id.clone(), profile.generation, profile.mode);
@@ -284,7 +285,7 @@ impl Workspace {
             || sql::gate(&sql::classify(engine, &sql), mode, &confirmed).is_some()
         {
             self.note(
-                "dbdelve will not count rows under a filter it cannot run unprompted.".into(),
+                tr("dbdelve will not count rows under a filter it cannot run unprompted.").into(),
                 cx,
             );
             return;
@@ -343,11 +344,11 @@ impl Workspace {
                         Ok(Some(_)) => {}
                         Ok(None) => {
                             profile.session.notice =
-                                Some("The count came back without a number.".into());
+                                Some(tr("The count came back without a number.").into());
                         }
                         Err(error) => {
                             profile.session.notice =
-                                Some(format!("The count failed: {}", error.message));
+                                Some(trf!("The count failed: {}", error.message));
                         }
                     }
                 }
@@ -464,9 +465,7 @@ impl Workspace {
                     }
                     match result {
                         Ok(ddl) => cx.write_to_clipboard(ClipboardItem::new_string(ddl)),
-                        Err(error) => {
-                            workspace.note(format!("Could not read the DDL: {error}"), cx)
-                        }
+                        Err(error) => workspace.note(trf!("Could not read the DDL: {}", error), cx),
                     }
                 })
                 .ok();
@@ -770,10 +769,10 @@ impl Workspace {
                                 .generated(&sql, &CancelToken::default())
                                 .map(|result| !result.rows.is_empty())
                                 .map_err(|error| error.message),
-                            None => Err(
-                                "dbdelve will not run a check it cannot read as a single read."
-                                    .into(),
-                            ),
+                            None => Err(tr(
+                                "dbdelve will not run a check it cannot read as a single read.",
+                            )
+                            .into()),
                         };
                         (index, label, answer)
                     })

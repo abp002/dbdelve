@@ -25,6 +25,7 @@ use time::parsing::Parsed;
 use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 use tree_sitter::{Node, Parser, Point, Tree};
 
+use crate::i18n::{tr, trf};
 use crate::result_grid::{NewValue, PendingRow};
 use crate::sql::{Destructive, Mode, Verdict};
 
@@ -411,7 +412,7 @@ fn read(text: &str) -> Vec<Reading> {
                 .map(|span| {
                     (
                         span.clone(),
-                        Err(error(span.start, "The grammar failed to load")),
+                        Err(error(span.start, tr("The grammar failed to load"))),
                     )
                 })
                 .into_iter()
@@ -528,17 +529,20 @@ impl Reader {
     fn reread(&mut self, span: Range<usize>) -> Result<Target, ParseError> {
         let tree = self
             .parse_range(span.clone())
-            .ok_or_else(|| error(span.start, "The parser gave up"))?;
+            .ok_or_else(|| error(span.start, tr("The parser gave up")))?;
         let root = tree.root_node();
         if let Some(bad) = first_error(root) {
             // An error running to the end of the text is the grammar giving up
             // on an unfinished statement, not on its first token.
             if bad.is_error() && bad.end_byte() >= span.end {
-                return Err(error(span.end, "The statement ends before it is complete"));
+                return Err(error(
+                    span.end,
+                    tr("The statement ends before it is complete"),
+                ));
             }
             let message = match bad.is_missing() {
-                true => format!("Expected `{}` here", bad.kind()),
-                false => format!("Unexpected `{}`", snippet(bad, &self.source)),
+                true => trf!("Expected `{}` here", bad.kind()),
+                false => trf!("Unexpected `{}`", snippet(bad, &self.source)),
             };
             return Err(error(bad.start_byte(), message));
         }
@@ -547,10 +551,10 @@ impl Reader {
         };
         match parts(root).as_slice() {
             [statement] => walk.statement(*statement),
-            [] => Err(error(span.start, "There is no statement here")),
+            [] => Err(error(span.start, tr("There is no statement here"))),
             [_, next, ..] => Err(error(
                 next.start_byte(),
-                format!(
+                trf!(
                     "`{}` follows a complete statement on the same line, with no `;` between them",
                     snippet(*next, &self.source)
                 ),
@@ -676,8 +680,9 @@ fn show(what: &str, at: usize) -> Result<Target, ParseError> {
         "collections" => Ok(Target::Show(Show::Collections)),
         other => Err(error(
             at,
-            format!(
-                "`show {other}` is not one DBDelve reads; it reads `show dbs` and `show collections`"
+            trf!(
+                "`show {}` is not one DBDelve reads; it reads `show dbs` and `show collections`",
+                other
             ),
         )),
     }
@@ -758,7 +763,10 @@ impl<'s> Walk<'s> {
         match text.contains('\\') {
             true => Err(error(
                 node.start_byte(),
-                format!("`{text}` spells a name with an escape, which DBDelve does not read"),
+                trf!(
+                    "`{}` spells a name with an escape, which DBDelve does not read",
+                    text
+                ),
             )),
             false => Ok(text),
         }
@@ -767,9 +775,10 @@ impl<'s> Walk<'s> {
     fn unsupported(&self, node: Node, what: &str) -> ParseError {
         error(
             node.start_byte(),
-            format!(
-                "`{}` is not {what} DBDelve reads",
-                snippet(node, self.source)
+            trf!(
+                "`{}` is not {} DBDelve reads",
+                snippet(node, self.source),
+                what
             ),
         )
     }
@@ -777,13 +786,13 @@ impl<'s> Walk<'s> {
     fn statement(&self, node: Node<'s>) -> Result<Target, ParseError> {
         match (node.kind(), parts(node).as_slice()) {
             ("expression_statement", [expression]) => self.target(*expression),
-            _ => Err(self.unsupported(node, "a statement")),
+            _ => Err(self.unsupported(node, tr("a statement"))),
         }
     }
 
     fn field<'t>(&self, node: Node<'t>, name: &str) -> Result<Node<'t>, ParseError> {
         node.child_by_field_name(name)
-            .ok_or_else(|| self.unsupported(node, "something"))
+            .ok_or_else(|| self.unsupported(node, tr("something")))
     }
 
     /// `node` flattened into the `db` it starts from and the steps after it.
@@ -792,7 +801,7 @@ impl<'s> Walk<'s> {
             "identifier" if self.name(node)? == "db" => Ok(()),
             "identifier" => Err(error(
                 node.start_byte(),
-                format!(
+                trf!(
                     "A statement starts with `db` or `show`, not `{}`",
                     self.text(node)
                 ),
@@ -803,10 +812,10 @@ impl<'s> Walk<'s> {
                 let dot = node
                     .children(&mut cursor)
                     .find(|child| child.kind() == ".")
-                    .ok_or_else(|| self.unsupported(node, "an access"))?;
+                    .ok_or_else(|| self.unsupported(node, tr("an access")))?;
                 let property = self.field(node, "property")?;
                 if property.kind() != "property_identifier" {
-                    return Err(self.unsupported(property, "a name"));
+                    return Err(self.unsupported(property, tr("a name")));
                 }
                 out.push(Link::Member {
                     name: self.name(property)?,
@@ -819,12 +828,12 @@ impl<'s> Walk<'s> {
                 self.links(self.field(node, "function")?, out)?;
                 let arguments = self.field(node, "arguments")?;
                 if arguments.kind() != "arguments" {
-                    return Err(self.unsupported(arguments, "an argument list"));
+                    return Err(self.unsupported(arguments, tr("an argument list")));
                 }
                 out.push(Link::Call(arguments));
                 Ok(())
             }
-            _ => Err(self.unsupported(node, "part of a statement")),
+            _ => Err(self.unsupported(node, tr("part of a statement"))),
         }
     }
 
@@ -836,10 +845,10 @@ impl<'s> Walk<'s> {
     ) -> Result<(&'s str, usize, usize), ParseError> {
         match links.next() {
             Some(Link::Member { name, dot, at }) => Ok((name, dot, at)),
-            Some(Link::Call(arguments)) => Err(self.unsupported(arguments, "a call")),
+            Some(Link::Call(arguments)) => Err(self.unsupported(arguments, tr("a call"))),
             None => Err(error(
                 end,
-                format!("The statement ends where {wanted} should follow"),
+                trf!("The statement ends where {} should follow", wanted),
             )),
         }
     }
@@ -852,7 +861,8 @@ impl<'s> Walk<'s> {
 
         let mut database = None;
         let collection = loop {
-            let (name, dot, at) = self.member(&mut links, end, "a collection or method name")?;
+            let (name, dot, at) =
+                self.member(&mut links, end, tr("a collection or method name"))?;
             let Some(arguments) = next_call(&mut links) else {
                 break name.to_owned();
             };
@@ -864,11 +874,11 @@ impl<'s> Walk<'s> {
                         .into_iter()
                         .find(|method| method.name() == name)
                         .ok_or_else(|| {
-                            error(at, format!("`db.{name}` is not a method DBDelve reads"))
+                            error(at, trf!("`db.{}` is not a method DBDelve reads", name))
                         })?;
                     let call = self.call(method, name, method.arity(), dot, arguments)?;
                     if let Some(Link::Member { dot, .. }) = links.next() {
-                        return Err(error(dot, format!("Nothing can be chained after `{name}`")));
+                        return Err(error(dot, trf!("Nothing can be chained after `{}`", name)));
                     }
                     return Ok(Target::Database { database, call });
                 }
@@ -877,7 +887,8 @@ impl<'s> Walk<'s> {
 
         let mut collection = collection;
         let (name, dot, at, arguments) = loop {
-            let (name, dot, at) = self.member(&mut links, end, "`.` and a collection method")?;
+            let (name, dot, at) =
+                self.member(&mut links, end, tr("`.` and a collection method"))?;
             match next_call(&mut links) {
                 Some(arguments) => break (name, dot, at, arguments),
                 None => {
@@ -892,18 +903,21 @@ impl<'s> Walk<'s> {
             .ok_or_else(|| {
                 error(
                     at,
-                    format!("`{name}` is not a collection method DBDelve reads"),
+                    trf!("`{}` is not a collection method DBDelve reads", name),
                 )
             })?;
         let call = self.call(method, name, method.arity(), dot, arguments)?;
 
         let mut cursor: Vec<Call<CursorMethod>> = Vec::new();
         while links.peek().is_some() {
-            let (link, dot, at) = self.member(&mut links, end, "a cursor method")?;
+            let (link, dot, at) = self.member(&mut links, end, tr("a cursor method"))?;
             if !method.returns_cursor() && !(method.takes_explain() && link == "explain") {
                 return Err(error(
                     dot,
-                    format!("`{name}` returns no cursor, so nothing can be chained after it"),
+                    trf!(
+                        "`{}` returns no cursor, so nothing can be chained after it",
+                        name
+                    ),
                 ));
             }
             if cursor
@@ -912,18 +926,17 @@ impl<'s> Walk<'s> {
             {
                 return Err(error(
                     dot,
-                    "`explain` returns a plan, so nothing can be chained after it",
+                    tr("`explain` returns a plan, so nothing can be chained after it"),
                 ));
             }
             let chained = CursorMethod::ALL
                 .into_iter()
                 .find(|method| method.name() == link)
                 .ok_or_else(|| {
-                    error(at, format!("`{link}` is not a cursor method DBDelve reads"))
+                    error(at, trf!("`{}` is not a cursor method DBDelve reads", link))
                 })?;
-            let arguments = next_call(&mut links).ok_or_else(|| {
-                error(at, format!("`{link}` is a method, and is not called here"))
-            })?;
+            let arguments = next_call(&mut links)
+                .ok_or_else(|| error(at, trf!("`{}` is a method, and is not called here", link)))?;
             cursor.push(self.call(chained, link, chained.arity(), dot, arguments)?);
         }
         Ok(Target::Collection {
@@ -945,14 +958,14 @@ impl<'s> Walk<'s> {
         let args = self.args(arguments)?;
         if !(fewest..=most).contains(&args.len()) {
             let takes = match (fewest, most) {
-                (0, 0) => "no arguments".to_owned(),
-                (1, 1) => "one argument".to_owned(),
-                (fewest, most) if fewest == most => format!("{fewest} arguments"),
-                (fewest, most) => format!("{fewest} to {most} arguments"),
+                (0, 0) => tr("no arguments").to_owned(),
+                (1, 1) => tr("one argument").to_owned(),
+                (fewest, most) if fewest == most => trf!("{} arguments", fewest),
+                (fewest, most) => trf!("{} to {} arguments", fewest, most),
             };
             return Err(error(
                 arguments.start_byte(),
-                format!("`{name}` takes {takes}, and was given {}", args.len()),
+                trf!("`{}` takes {}, and was given {}", name, takes, args.len()),
             ));
         }
         Ok(Call {
@@ -991,7 +1004,7 @@ impl<'s> Walk<'s> {
                     ..
                 },
             ] if !text.is_empty() => Ok(text.clone()),
-            _ => Err(error(at, format!("`{name}` takes one name, as a string"))),
+            _ => Err(error(at, trf!("`{}` takes one name, as a string", name))),
         }
     }
 
@@ -1008,7 +1021,7 @@ impl<'s> Walk<'s> {
             "identifier" => match self.text(node) {
                 "Infinity" => Ok(Value::Double(f64::INFINITY)),
                 "NaN" => Ok(Value::Double(f64::NAN)),
-                _ => Err(self.unsupported(node, "a literal")),
+                _ => Err(self.unsupported(node, tr("a literal"))),
             },
             "unary_expression" => {
                 let operator = self.text(self.field(node, "operator")?);
@@ -1017,12 +1030,12 @@ impl<'s> Walk<'s> {
                     ("number", _) => self.number(argument)?,
                     ("identifier", "Infinity") => f64::INFINITY,
                     ("identifier", "NaN") => f64::NAN,
-                    _ => return Err(self.unsupported(node, "a literal")),
+                    _ => return Err(self.unsupported(node, tr("a literal"))),
                 };
                 match operator {
                     "-" => Ok(number(-magnitude)),
                     "+" => Ok(number(magnitude)),
-                    _ => Err(self.unsupported(node, "a literal")),
+                    _ => Err(self.unsupported(node, tr("a literal"))),
                 }
             }
             "regex" => {
@@ -1035,7 +1048,7 @@ impl<'s> Walk<'s> {
             "new_expression" => {
                 let constructor = self.field(node, "constructor")?;
                 if constructor.kind() != "identifier" {
-                    return Err(self.unsupported(constructor, "a constructor"));
+                    return Err(self.unsupported(constructor, tr("a constructor")));
                 }
                 let args = match node.child_by_field_name("arguments") {
                     Some(arguments) => self.args(arguments)?,
@@ -1047,11 +1060,11 @@ impl<'s> Walk<'s> {
                 let function = self.field(node, "function")?;
                 let arguments = self.field(node, "arguments")?;
                 if function.kind() != "identifier" || arguments.kind() != "arguments" {
-                    return Err(self.unsupported(node, "a literal"));
+                    return Err(self.unsupported(node, tr("a literal")));
                 }
                 constructor_value(self.name(function)?, self.args(arguments)?, at, false)
             }
-            _ => Err(self.unsupported(node, "a literal")),
+            _ => Err(self.unsupported(node, tr("a literal"))),
         }
     }
 
@@ -1068,7 +1081,10 @@ impl<'s> Walk<'s> {
             match child.kind() {
                 "[" | "]" | "comment" => {}
                 "," if after_separator => {
-                    return Err(error(child.start_byte(), "An array has an empty slot here"));
+                    return Err(error(
+                        child.start_byte(),
+                        tr("An array has an empty slot here"),
+                    ));
                 }
                 "," => after_separator = true,
                 _ => {
@@ -1088,13 +1104,13 @@ impl<'s> Walk<'s> {
         let mut fields = Vec::new();
         for pair in parts(node) {
             if pair.kind() != "pair" {
-                return Err(self.unsupported(pair, "a field"));
+                return Err(self.unsupported(pair, tr("a field")));
             }
             let key = self.field(pair, "key")?;
             let key = match key.kind() {
                 "property_identifier" => self.name(key)?.to_owned(),
                 "string" => self.string(key)?,
-                _ => return Err(self.unsupported(key, "a field name")),
+                _ => return Err(self.unsupported(key, tr("a field name"))),
             };
             fields.push((key, self.value(self.field(pair, "value")?)?));
         }
@@ -1120,13 +1136,13 @@ impl<'s> Walk<'s> {
                 "escape_sequence" => {
                     escape(text, &mut units).map_err(|m| error(part.start_byte(), m))?
                 }
-                _ => return Err(self.unsupported(part, "part of a string")),
+                _ => return Err(self.unsupported(part, tr("part of a string"))),
             }
         }
         String::from_utf16(&units).map_err(|_| {
             error(
                 node.start_byte(),
-                "This string holds half a surrogate pair, which is no character",
+                tr("This string holds half a surrogate pair, which is no character"),
             )
         })
     }
@@ -1149,7 +1165,7 @@ impl<'s> Walk<'s> {
             None if legacy_octal => None,
             None => text.parse::<f64>().ok(),
         };
-        value.ok_or_else(|| self.unsupported(node, "a number"))
+        value.ok_or_else(|| self.unsupported(node, tr("a number")))
     }
 }
 
@@ -1166,20 +1182,20 @@ fn escape(sequence: &str, units: &mut Vec<u16>) -> Result<(), String> {
         Some('f') => 0x0C,
         Some('v') => 0x0B,
         Some('0') if body.len() == 1 => 0,
-        Some('0'..='7') => return Err(format!("`{sequence}` is an octal escape")),
-        Some('8' | '9') => return Err(format!("`{sequence}` is not a valid escape")),
+        Some('0'..='7') => return Err(trf!("`{}` is an octal escape", sequence)),
+        Some('8' | '9') => return Err(trf!("`{}` is not a valid escape", sequence)),
         Some('x' | 'u') => {
             let digits = body[1..].trim_start_matches('{').trim_end_matches('}');
             let width = body[1..].starts_with('{')
                 || digits.len() == if body.starts_with('x') { 2 } else { 4 };
             match u32::from_str_radix(digits, 16) {
                 Ok(code) if width && !digits.is_empty() && code <= 0x10FFFF => code,
-                _ => return Err(format!("`{sequence}` is not a valid escape")),
+                _ => return Err(trf!("`{}` is not a valid escape", sequence)),
             }
         }
         Some('\r' | '\n' | '\u{2028}' | '\u{2029}') => return Ok(()),
         Some(other) => other as u32,
-        None => return Err("A string ends in a lone `\\`".into()),
+        None => return Err(tr("A string ends in a lone `\\`").into()),
     };
     match char::from_u32(code) {
         Some(c) => units.extend(c.encode_utf16(&mut [0; 2]).iter()),
@@ -1196,18 +1212,18 @@ fn constructor_value(
     with_new: bool,
 ) -> Result<Value, ParseError> {
     let args: Vec<Value> = args.into_iter().map(|arg| arg.value).collect();
-    let takes = |wants: &str| error(at, format!("`{name}` takes {wants}"));
+    let takes = |wants: &str| error(at, trf!("`{}` takes {}", name, wants));
     let value = match (name, args.as_slice()) {
         ("ObjectId", []) => Value::ObjectId(None),
         ("ObjectId", [Value::String(hex)]) => object_id(hex).map_err(|m| error(at, m))?,
-        ("ObjectId", _) => return Err(takes("a 24-digit hex string")),
+        ("ObjectId", _) => return Err(takes(tr("a 24-digit hex string"))),
         ("ISODate", []) => now(),
         ("ISODate", [Value::String(text)]) => iso_date(text).map_err(|m| error(at, m))?,
-        ("ISODate", _) => return Err(takes("an ISO-8601 date string")),
+        ("ISODate", _) => return Err(takes(tr("an ISO-8601 date string"))),
         ("Date", _) if !with_new => {
             return Err(error(
                 at,
-                "`Date(…)` without `new` is a string in mongosh, not a date",
+                tr("`Date(…)` without `new` is a string in mongosh, not a date"),
             ));
         }
         ("Date", []) => now(),
@@ -1215,8 +1231,9 @@ fn constructor_value(
             Some((_, true)) => {
                 return Err(error(
                     at,
-                    format!(
-                        "`{text}` has a time and no UTC offset, which `new Date` reads in the machine's own time zone"
+                    trf!(
+                        "`{}` has a time and no UTC offset, which `new Date` reads in the machine's own time zone",
+                        text
                     ),
                 ));
             }
@@ -1225,14 +1242,14 @@ fn constructor_value(
         ("Date", [millis]) if integer(millis).is_some() => {
             Value::Date(integer(millis).expect("checked"))
         }
-        ("Date", _) => return Err(takes("an ISO-8601 string or milliseconds since 1970")),
+        ("Date", _) => return Err(takes(tr("an ISO-8601 string or milliseconds since 1970"))),
         ("NumberInt" | "Int32", [value]) => match numeric(value).map(i32::try_from) {
             Some(Ok(n)) => Value::Int32(n),
-            _ => return Err(takes("a whole number that fits in 32 bits")),
+            _ => return Err(takes(tr("a whole number that fits in 32 bits"))),
         },
         ("NumberLong" | "Long", [value]) => match numeric(value) {
             Some(n) => Value::Int64(n),
-            None => return Err(takes("a whole number that fits in 64 bits")),
+            None => return Err(takes(tr("a whole number that fits in 64 bits"))),
         },
         ("NumberDecimal" | "Decimal128", [value]) => {
             let text = match value {
@@ -1243,7 +1260,7 @@ fn constructor_value(
                     format!("{}Infinity", if *n < 0.0 { "-" } else { "" })
                 }
                 Value::Double(n) => n.to_string(),
-                _ => return Err(takes("a decimal number, as a string")),
+                _ => return Err(takes(tr("a decimal number, as a string"))),
             };
             decimal(text).map_err(|m| error(at, m))?
         }
@@ -1251,24 +1268,24 @@ fn constructor_value(
         ("Double", [Value::Double(n)]) => Value::Double(*n),
         ("Double", [Value::String(text)]) => match text.trim().parse() {
             Ok(n) => Value::Double(n),
-            Err(_) => return Err(takes("a number")),
+            Err(_) => return Err(takes(tr("a number"))),
         },
         ("UUID", [Value::String(text)]) => uuid(text).map_err(|m| error(at, m))?,
-        ("UUID", _) => return Err(takes("a UUID string")),
+        ("UUID", _) => return Err(takes(tr("a UUID string"))),
         ("BinData", [subtype, Value::String(data)]) => {
             binary(subtype, STANDARD.decode(data).ok(), "base64").map_err(|m| error(at, m))?
         }
         ("HexData", [subtype, Value::String(data)]) => {
             binary(subtype, hex::decode(data).ok(), "hex").map_err(|m| error(at, m))?
         }
-        ("BinData" | "HexData", _) => return Err(takes("a subtype number and a string")),
+        ("BinData" | "HexData", _) => return Err(takes(tr("a subtype number and a string"))),
         ("Timestamp", []) => Value::Timestamp { t: 0, i: 0 },
         ("Timestamp", [t, i]) => timestamp(t, i).map_err(|m| error(at, m))?,
         ("Timestamp", [Value::Document(fields)]) => match fields.as_slice() {
             [(t_key, t), (i_key, i)] if t_key == "t" && i_key == "i" => {
                 timestamp(t, i).map_err(|m| error(at, m))?
             }
-            _ => return Err(takes("`t` and `i`, or `{ t: …, i: … }`")),
+            _ => return Err(takes(tr("`t` and `i`, or `{ t: …, i: … }`"))),
         },
         ("MinKey", []) => Value::MinKey,
         ("MaxKey", []) => Value::MaxKey,
@@ -1278,43 +1295,37 @@ fn constructor_value(
         ("RegExp", [Value::String(pattern), Value::String(flags)]) => {
             regex_value(pattern.clone(), flags.clone()).map_err(|m| error(at, m))?
         }
-        ("RegExp", _) => return Err(takes("a pattern string and optional flags")),
+        ("RegExp", _) => return Err(takes(tr("a pattern string and optional flags"))),
         ("Code", [Value::String(code)]) => Value::Code(code.clone()),
-        ("Code", _) => return Err(takes("its JavaScript as a string")),
+        ("Code", _) => return Err(takes(tr("its JavaScript as a string"))),
         ("NumberInt" | "Int32" | "NumberLong" | "Long", _) => {
-            return Err(takes(&format!(
+            return Err(takes(&trf!(
                 "one whole number, and was given {}",
                 given(&args)
             )));
         }
         ("NumberDecimal" | "Decimal128", _) => {
-            return Err(takes(&format!(
+            return Err(takes(&trf!(
                 "one decimal number, and was given {}",
                 given(&args)
             )));
         }
         ("Double", _) => {
-            return Err(takes(&format!(
-                "one number, and was given {}",
-                given(&args)
-            )));
+            return Err(takes(&trf!("one number, and was given {}", given(&args))));
         }
         ("Timestamp", _) => {
-            return Err(takes(&format!(
-                "`t` and `i`, or `{{ t: …, i: … }}`, and was given {}",
+            return Err(takes(&trf!(
+                "`t` and `i`, or `{ t: …, i: … }`, and was given {}",
                 given(&args)
             )));
         }
         ("MinKey" | "MaxKey", _) => {
-            return Err(takes(&format!(
-                "no arguments, and was given {}",
-                given(&args)
-            )));
+            return Err(takes(&trf!("no arguments, and was given {}", given(&args))));
         }
         (other, _) => {
             return Err(error(
                 at,
-                format!("`{other}` is not a constructor DBDelve reads"),
+                trf!("`{}` is not a constructor DBDelve reads", other),
             ));
         }
     };
@@ -1324,9 +1335,9 @@ fn constructor_value(
 /// What a constructor was handed, for a message saying why it refused.
 fn given(args: &[Value]) -> String {
     match args {
-        [] => "none".to_owned(),
+        [] => tr("none").to_owned(),
         [value] => kind(value).to_owned(),
-        many => format!("{} arguments", many.len()),
+        many => trf!("{} arguments", many.len()),
     }
 }
 
@@ -1388,7 +1399,7 @@ fn object_id(hex_text: &str) -> Result<Value, String> {
     let mut bytes = [0u8; 12];
     match hex::decode_to_slice(hex_text, &mut bytes) {
         Ok(()) => Ok(Value::ObjectId(Some(bytes))),
-        Err(_) => Err(format!("`{hex_text}` is not an ObjectId's 24 hex digits")),
+        Err(_) => Err(trf!("`{}` is not an ObjectId's 24 hex digits", hex_text)),
     }
 }
 
@@ -1396,15 +1407,15 @@ fn uuid(text: &str) -> Result<Value, String> {
     let digits: String = text.chars().filter(|&c| c != '-').collect();
     match (digits.len(), hex::decode(&digits)) {
         (32, Ok(bytes)) => Ok(Value::Binary { subtype: 4, bytes }),
-        _ => Err(format!("`{text}` is not a UUID's 32 hex digits")),
+        _ => Err(trf!("`{}` is not a UUID's 32 hex digits", text)),
     }
 }
 
 fn binary(subtype: &Value, bytes: Option<Vec<u8>>, encoding: &str) -> Result<Value, String> {
     let subtype = integer(subtype)
         .and_then(|n| u8::try_from(n).ok())
-        .ok_or("A binary subtype is a number from 0 to 255")?;
-    let bytes = bytes.ok_or_else(|| format!("The binary data is not valid {encoding}"))?;
+        .ok_or(tr("A binary subtype is a number from 0 to 255"))?;
+    let bytes = bytes.ok_or_else(|| trf!("The binary data is not valid {}", encoding))?;
     Ok(Value::Binary { subtype, bytes })
 }
 
@@ -1412,7 +1423,7 @@ fn timestamp(t: &Value, i: &Value) -> Result<Value, String> {
     let part = |value: &Value| integer(value).and_then(|n| u32::try_from(n).ok());
     match (part(t), part(i)) {
         (Some(t), Some(i)) => Ok(Value::Timestamp { t, i }),
-        _ => Err("A timestamp's `t` and `i` are whole numbers from 0 to 4294967295".into()),
+        _ => Err(tr("A timestamp's `t` and `i` are whole numbers from 0 to 4294967295").into()),
     }
 }
 
@@ -1421,8 +1432,9 @@ fn timestamp(t: &Value, i: &Value) -> Result<Value, String> {
 /// drop.
 fn regex_value(pattern: String, flags: String) -> Result<Value, String> {
     match flags.chars().find(|flag| !"imsux".contains(*flag)) {
-        Some(flag) => Err(format!(
-            "`{flag}` is not a regex option MongoDB knows; it knows i, m, s, u and x"
+        Some(flag) => Err(trf!(
+            "`{}` is not a regex option MongoDB knows; it knows i, m, s, u and x",
+            flag
         )),
         None => Ok(Value::Regex { pattern, flags }),
     }
@@ -1442,7 +1454,7 @@ fn decimal(text: String) -> Result<Value, String> {
     let special = matches!(body, "Infinity" | "Inf" | "NaN");
     match special || (mantissa_ok && !exponent.is_empty() && digits(exponent)) {
         true => Ok(Value::Decimal128(text)),
-        false => Err(format!("`{text}` is not a decimal number")),
+        false => Err(trf!("`{}` is not a decimal number", text)),
     }
 }
 
@@ -1484,7 +1496,7 @@ impl Drop for HeldClock {
 fn iso_date(text: &str) -> Result<Value, String> {
     iso_millis(text)
         .map(|(millis, _)| Value::Date(millis))
-        .ok_or_else(|| format!("`{text}` is not an ISO-8601 date"))
+        .ok_or_else(|| trf!("`{}` is not an ISO-8601 date", text))
 }
 
 /// The forms mongosh's `ISODate` takes: a date, optionally a time to the
@@ -1560,8 +1572,12 @@ fn extended_json(fields: Vec<(String, Value)>) -> Result<Value, String> {
     else {
         return Ok(Value::Document(fields));
     };
-    let malformed =
-        || format!("`{wrapper}` is an Extended JSON wrapper, and this one is malformed");
+    let malformed = || {
+        trf!(
+            "`{}` is an Extended JSON wrapper, and this one is malformed",
+            wrapper
+        )
+    };
     let body = |key: &str, fields: &[(String, Value)]| -> Option<Value> {
         fields
             .iter()
@@ -1662,7 +1678,7 @@ pub(crate) fn classify(text: &str) -> Verdict {
 /// explains, so a statement that writes, or that cannot be read whole, is
 /// refused here for both modes rather than trusted to the server's `explain`.
 pub(crate) fn explainable(text: &str) -> Result<(), String> {
-    let refusal = "Explain takes one find, aggregate, countDocuments or distinct statement.";
+    let refusal = tr("Explain takes one find, aggregate, countDocuments or distinct statement.");
     let statements = parse(text).map_err(|error| error.message)?;
     let [
         Statement {
@@ -1703,10 +1719,10 @@ pub(crate) fn explainable(text: &str) -> Result<(), String> {
         .iter()
         .any(|call| call.method == CursorMethod::Explain)
     {
-        return Err("The statement already asks for a plan.".into());
+        return Err(tr("The statement already asks for a plan.").into());
     }
     if classify(text) != Verdict::READ {
-        return Err("Only a statement that reads can be explained.".into());
+        return Err(tr("Only a statement that reads can be explained.").into());
     }
     Ok(())
 }
@@ -1938,7 +1954,7 @@ fn writes_out(value: &Value) -> bool {
 /// that does not read as one is the error, never a string in its place.
 pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
     if rows.is_empty() {
-        return Err("There are no edits to apply.".into());
+        return Err(tr("There are no edits to apply.").into());
     }
     let mut statements = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1951,8 +1967,9 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                 NewValue::Value(text) => typed(field, text, type_of(&row.types, field))?,
                 NewValue::Null => Value::Null,
                 NewValue::Default => {
-                    return Err(format!(
-                        "{field}: MongoDB has no default for a field to take."
+                    return Err(trf!(
+                        "{}: MongoDB has no default for a field to take.",
+                        field
                     ));
                 }
             };
@@ -1987,7 +2004,7 @@ pub(crate) fn insert_row(
         fields.push((field.to_owned(), value));
     }
     if fields.is_empty() {
-        return Err("There is nothing in this row to insert.".into());
+        return Err(tr("There is nothing in this row to insert.").into());
     }
     if let Some((field, _)) = fields.iter().find(|(field, _)| field.starts_with('$')) {
         return Err(unwritable_field(field));
@@ -2024,8 +2041,9 @@ pub(crate) fn writable_field(field: &str) -> bool {
 }
 
 fn unwritable_field(field: &str) -> String {
-    format!(
-        "`{field}` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator."
+    trf!(
+        "`{}` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.",
+        field
     )
 }
 
@@ -2036,7 +2054,7 @@ fn collection(table: &str) -> String {
 /// `{_id: <value>}`, from the key's values as the server sent them.
 fn key_filter(keys: &[(String, String)], types: &[(String, String)]) -> Result<String, String> {
     if keys.is_empty() {
-        return Err("dbdelve cannot name an edited row by its primary key.".into());
+        return Err(tr("dbdelve cannot name an edited row by its primary key.").into());
     }
     let fields = keys
         .iter()
@@ -2074,8 +2092,9 @@ fn typed(field: &str, text: &str, tag: Option<&str>) -> Result<Value, String> {
     let value = coerce(text, tag).map_err(|message| format!("{field}: {message}"))?;
     match operator_free(&value) {
         true => Ok(value),
-        false => Err(format!(
-            "{field}: a field name starting with `$` inside a value is an operator, which DBDelve does not write."
+        false => Err(trf!(
+            "{}: a field name starting with `$` inside a value is an operator, which DBDelve does not write.",
+            field
         )),
     }
 }
@@ -2116,8 +2135,11 @@ pub(crate) fn coerce(text: &str, tag: Option<&str>) -> Result<Value, String> {
         _ => {
             let shown: String = text.chars().take(40).collect();
             let more = if shown.len() < text.len() { "…" } else { "" };
-            Err(format!(
-                "`{shown}{more}` does not read as a value of type {tag}."
+            Err(trf!(
+                "`{}{}` does not read as a value of type {}.",
+                shown,
+                more,
+                tag
             ))
         }
     }
@@ -2403,11 +2425,11 @@ fn distinct(fields: &[(String, Value)]) -> bool {
 pub(crate) fn format(text: &str) -> Result<String, &'static str> {
     const UNREADABLE: &str = "Not formatting: a statement in the buffer does not parse.";
     let _clock = HeldClock::hold();
-    let statements = parse(text).map_err(|_| UNREADABLE)?;
+    let statements = parse(text).map_err(|_| tr(UNREADABLE))?;
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .map_err(|_| UNREADABLE)?;
+        .map_err(|_| tr(UNREADABLE))?;
 
     let mut formatted = String::with_capacity(text.len());
     let mut written = 0;
@@ -2429,7 +2451,7 @@ pub(crate) fn format(text: &str) -> Result<String, &'static str> {
     }
     formatted += &text[written..];
 
-    let reread = parse(&formatted).map_err(|_| UNREADABLE)?;
+    let reread = parse(&formatted).map_err(|_| tr(UNREADABLE))?;
     let same = reread.len() == statements.len()
         && reread
             .iter()
@@ -2437,7 +2459,9 @@ pub(crate) fn format(text: &str) -> Result<String, &'static str> {
             .all(|(after, before)| unspanned(&after.target) == unspanned(&before.target));
     match same {
         true => Ok(formatted),
-        false => Err("Not formatting: the new layout would read as different statements."),
+        false => Err(tr(
+            "Not formatting: the new layout would read as different statements.",
+        )),
     }
 }
 

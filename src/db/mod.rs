@@ -16,6 +16,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::i18n::{tr, trf};
 use serde::{Deserialize, Serialize};
 
 pub use crate::tls::SslMode;
@@ -99,8 +100,8 @@ impl Syntax {
 
     pub fn placeholder(self) -> &'static str {
         match self {
-            Self::Sql => "Write SQL…",
-            Self::Mongo => "Write a query, like db.collection.find({})…",
+            Self::Sql => tr("Write SQL…"),
+            Self::Mongo => tr("Write a query, like db.collection.find({})…"),
         }
     }
 }
@@ -192,7 +193,7 @@ impl Engine {
             "snowflake" => Ok(Self::Snowflake),
             "mssql" | "sqlserver" => Ok(Self::SqlServer),
             "mongodb" | "mongodb+srv" => Ok(Self::MongoDb),
-            other => Err(format!("{other} is not a database engine dbdelve speaks.")),
+            other => Err(trf!("{} is not a database engine dbdelve speaks.", other)),
         }
     }
 
@@ -432,16 +433,16 @@ impl Engine {
     /// The column dropdown's entry that swaps the bar for the user's own filter.
     pub fn raw_filter_label(self) -> &'static str {
         match self.syntax() {
-            Syntax::Sql => "Raw SQL",
-            Syntax::Mongo => "Raw filter",
+            Syntax::Sql => tr("Raw SQL"),
+            Syntax::Mongo => tr("Raw filter"),
         }
     }
 
     /// What a generated statement is called where one is shown for review.
     pub fn review_label(self) -> &'static str {
         match self.syntax() {
-            Syntax::Sql => "Review SQL",
-            Syntax::Mongo => "Review statement",
+            Syntax::Sql => tr("Review SQL"),
+            Syntax::Mongo => tr("Review statement"),
         }
     }
 
@@ -632,8 +633,8 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::Snowflake
-            | Self::SqlServer => "an ORDER BY",
-            Self::MongoDb => "a sort",
+            | Self::SqlServer => tr("an ORDER BY"),
+            Self::MongoDb => tr("a sort"),
         }
     }
 
@@ -697,11 +698,11 @@ pub(super) fn percent_decoded(value: &str) -> Result<String, String> {
         if bytes[index] == b'%' {
             let digits = value
                 .get(index + 1..index + 3)
-                .ok_or_else(|| "Connection URL ends in an incomplete escape.".to_string())?;
-            decoded
-                .push(u8::from_str_radix(digits, 16).map_err(|_| {
-                    format!("Connection URL contains an invalid escape %{digits}.")
-                })?);
+                .ok_or_else(|| tr("Connection URL ends in an incomplete escape.").to_string())?;
+            decoded.push(
+                u8::from_str_radix(digits, 16)
+                    .map_err(|_| trf!("Connection URL contains an invalid escape %{}.", digits))?,
+            );
             index += 3;
         } else {
             decoded.push(bytes[index]);
@@ -709,24 +710,25 @@ pub(super) fn percent_decoded(value: &str) -> Result<String, String> {
         }
     }
 
-    String::from_utf8(decoded).map_err(|_| "Connection URL path is not valid UTF-8.".to_string())
+    String::from_utf8(decoded)
+        .map_err(|_| tr("Connection URL path is not valid UTF-8.").to_string())
 }
 
 /// A server engine's URL, read by dbdelve rather than by any driver: the
 /// userinfo, host, port and database, plus the two TLS keys dbdelve owns.
 pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, String> {
     let parsed =
-        url::Url::parse(url).map_err(|error| format!("Connection URL is invalid: {error}"))?;
+        url::Url::parse(url).map_err(|error| trf!("Connection URL is invalid: {}", error))?;
 
     let host = parsed
         .host_str()
         .filter(|host| !host.is_empty())
-        .ok_or_else(|| "Connection URL does not contain a host.".to_string())?
+        .ok_or_else(|| tr("Connection URL does not contain a host.").to_string())?
         .to_string();
     let database = parsed.path().trim_start_matches('/').to_string();
     let user = percent_decoded(parsed.username())?;
     if user.is_empty() {
-        return Err("Connection URL does not contain a username.".into());
+        return Err(tr("Connection URL does not contain a username.").into());
     }
 
     let mut sslmode = SslMode::default();
@@ -742,8 +744,10 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
             // go, and silently ignoring one is how a connection ends up not
             // being the connection that was asked for.
             other => {
-                return Err(format!(
-                    "Connection URL parameter {other} is not one dbdelve can pass to {engine}."
+                return Err(trf!(
+                    "Connection URL parameter {} is not one dbdelve can pass to {}.",
+                    other,
+                    engine
                 ));
             }
         }
@@ -793,7 +797,7 @@ impl SshTunnel {
     /// opened from Finder.
     pub fn identity_file_error(path: &str) -> Option<String> {
         (!path.starts_with("~/") && !std::path::Path::new(path).is_absolute())
-            .then(|| "Identity file must be an absolute path to the key file.".to_owned())
+            .then(|| tr("Identity file must be an absolute path to the key file.").to_owned())
     }
 }
 
@@ -933,12 +937,15 @@ impl ConnectionConfig {
             .map(|(scheme, _)| scheme)
             .filter(|scheme| !scheme.is_empty())
             .ok_or_else(|| {
-                "Connection URL must start with a scheme, such as postgresql:// or sqlite://."
+                tr("Connection URL must start with a scheme, such as postgresql:// or sqlite://.")
                     .to_string()
             })?;
 
         match Engine::parse(scheme).map_err(|_| {
-            format!("Connection URL scheme {scheme}:// is not a database dbdelve speaks.")
+            trf!(
+                "Connection URL scheme {}:// is not a database dbdelve speaks.",
+                scheme
+            )
         })? {
             Engine::Postgres => postgres::config_from_url(url).map(Self::Postgres),
             Engine::MySql => mysql::config_from_url(url).map(Self::MySql),
@@ -952,7 +959,7 @@ impl ConnectionConfig {
             }),
             // Nobody pastes a Snowflake URL, because there is no such form.
             Engine::Snowflake => {
-                Err("Snowflake has no connection URL. Fill the fields in instead.".to_string())
+                Err(tr("Snowflake has no connection URL. Fill the fields in instead.").to_string())
             }
         }
     }
@@ -1652,7 +1659,7 @@ pub(super) fn assemble_catalog(
             "view" => RelationKind::View,
             "materialized_view" => RelationKind::MaterializedView,
             "foreign_table" => RelationKind::ForeignTable,
-            kind => return Err(unexpected_catalog_value("relation kind", kind)),
+            kind => return Err(unexpected_catalog_value(tr("relation kind"), kind)),
         };
 
         schema(&mut schemas, schema_name).relations.push(Relation {
@@ -1670,7 +1677,7 @@ pub(super) fn assemble_catalog(
         let kind = match required_cell(&routines, row, "routine_kind")? {
             "function" => RoutineKind::Function,
             "procedure" => RoutineKind::Procedure,
-            kind => return Err(unexpected_catalog_value("routine kind", kind)),
+            kind => return Err(unexpected_catalog_value(tr("routine kind"), kind)),
         };
 
         schema(&mut schemas, schema_name).routines.push(Routine {
@@ -1727,7 +1734,7 @@ pub(super) fn assemble_structure(
             nullable: match required_cell(&columns, row, "nullable")? {
                 "yes" => true,
                 "no" => false,
-                value => return Err(unexpected_catalog_value("nullability", value)),
+                value => return Err(unexpected_catalog_value(tr("nullability"), value)),
             },
             default: (!default.is_empty()).then(|| default.to_string()),
         });
@@ -1906,11 +1913,11 @@ pub(super) fn required_cell<'a>(
         .columns
         .iter()
         .position(|column| column.name == column_name)
-        .ok_or_else(|| plain_error(format!("Catalog query omitted column {column_name}.")))?;
+        .ok_or_else(|| plain_error(trf!("Catalog query omitted column {}.", column_name)))?;
 
     row.get(index)
         .and_then(Option::as_deref)
-        .ok_or_else(|| plain_error(format!("Catalog query returned no {column_name}.")))
+        .ok_or_else(|| plain_error(trf!("Catalog query returned no {}.", column_name)))
 }
 
 /// A catalog column an engine may have nothing to say about. A missing column
@@ -1930,17 +1937,18 @@ fn optional_cell<'a>(
 }
 
 pub(super) fn unexpected_catalog_value(label: &str, value: &str) -> DbError {
-    plain_error(format!("Catalog query returned unknown {label} {value}."))
+    plain_error(trf!("Catalog query returned unknown {} {}.", label, value))
 }
 
 pub(super) fn non_utf8_error(columns: &[Column], index: usize) -> DbError {
     let column = columns
         .get(index)
-        .map(|column| format!("column {}", column.name))
-        .unwrap_or_else(|| format!("column {index}"));
+        .map(|column| trf!("column {}", column.name))
+        .unwrap_or_else(|| trf!("column {}", index));
 
-    plain_error(format!(
-        "A value in {column} is not valid UTF-8 text and cannot be displayed."
+    plain_error(trf!(
+        "A value in {} is not valid UTF-8 text and cannot be displayed.",
+        column
     ))
 }
 

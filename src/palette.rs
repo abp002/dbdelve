@@ -26,6 +26,7 @@ use crate::{
     db::{ExplainMode, RelationKind, RoutineKind},
     explorer::{ExplorerTarget, ObjectKind},
     export::Format,
+    i18n::{tr, trf},
     icons::icon,
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
@@ -216,12 +217,12 @@ impl Palette {
 
     pub fn placeholder(&self) -> &'static str {
         match self.mode {
-            Mode::Jump => "Go to a table, view, routine or saved query…",
-            Mode::Commands => "Run a command…",
-            Mode::History => "Recall a statement you have run…",
-            Mode::Font(_) => "Pick a font…",
-            Mode::Theme => "Pick a theme…",
-            Mode::Database => "Switch database…",
+            Mode::Jump => tr("Go to a table, view, routine or saved query…"),
+            Mode::Commands => tr("Run a command…"),
+            Mode::History => tr("Recall a statement you have run…"),
+            Mode::Font(_) => tr("Pick a font…"),
+            Mode::Theme => tr("Pick a theme…"),
+            Mode::Database => tr("Switch database…"),
         }
     }
 }
@@ -294,7 +295,7 @@ impl ListDelegate for Palette {
         div()
             .p(px(layout::SPACE_MD))
             .text_color(theme(cx).text_muted)
-            .child("No matches.")
+            .child(tr("No matches."))
     }
 
     /// The live preview. Nothing here is saved, and nothing here undoes it:
@@ -322,15 +323,15 @@ impl ListDelegate for Palette {
 fn jump_items(profile: &Profile) -> Vec<Item> {
     let session = &profile.session;
     let mut items = vec![Item::command(
-        "New Query",
-        "scratch",
+        tr("New Query"),
+        tr("scratch"),
         icon::SCRATCH_QUERY,
         Command::OpenScratch,
     )];
 
     items.extend(session.saved_queries.iter().map(|name| Item {
         label: name.clone(),
-        hint: "query".into(),
+        hint: tr("query").into(),
         icon: icon::SAVED_QUERY,
         command: Command::OpenQuery(name.clone()),
     }));
@@ -417,7 +418,7 @@ fn font_items(slot: FontSlot, cx: &App) -> Vec<Item> {
         .filter(|name| !name.starts_with('.'))
         .map(|name| Item {
             hint: if name.as_str() == current.as_ref() {
-                "current"
+                tr("current")
             } else {
                 ""
             }
@@ -438,7 +439,7 @@ fn theme_items(cx: &App) -> Vec<Item> {
         .map(|candidate| Item {
             label: candidate.name.to_string(),
             hint: if candidate.name == current {
-                "current"
+                tr("current")
             } else {
                 ""
             }
@@ -459,7 +460,7 @@ fn database_items(profile: &Profile) -> Vec<Item> {
         .map(|name| Item {
             label: name.clone(),
             hint: if databases.current.as_ref() == Some(name) {
-                "current"
+                tr("current")
             } else {
                 ""
             }
@@ -487,7 +488,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     let overrides = &workspace.settings.custom_keybindings;
     let runnable = session.editor(session.active).is_some();
     let mut items = vec![Item::command(
-        "New query",
+        tr("New query"),
         chord_hint("new_query", overrides),
         icon::SCRATCH_QUERY,
         Command::NewQuery,
@@ -495,7 +496,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
 
     if runnable {
         items.push(Item::command(
-            "Run query",
+            tr("Run query"),
             chord_hint("run_query", overrides),
             icon::RUN,
             Command::RunQuery,
@@ -521,7 +522,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 }),
         );
         items.push(Item::command(
-            "Format query",
+            tr("Format query"),
             chord_hint("format_query", overrides),
             icon::STRUCTURE,
             Command::FormatQuery,
@@ -530,20 +531,20 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             && tab.plan.is_some()
         {
             items.push(match tab.showing_plan {
-                true => Item::command("Show data", "", icon::TABLE, Command::ShowPlan(false)),
-                false => Item::command("Show plan", "", icon::PLAN, Command::ShowPlan(true)),
+                true => Item::command(tr("Show data"), "", icon::TABLE, Command::ShowPlan(false)),
+                false => Item::command(tr("Show plan"), "", icon::PLAN, Command::ShowPlan(true)),
             });
         }
         if session.open_query().is_some() {
             items.push(Item::command(
-                "Rename query",
+                tr("Rename query"),
                 "",
                 icon::RENAME,
                 Command::RenameQuery,
             ));
         } else {
             items.push(Item::command(
-                "Save query",
+                tr("Save query"),
                 chord_hint("rename_query_tab", overrides),
                 icon::SAVE,
                 Command::SaveQuery,
@@ -555,7 +556,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // it forward, which is where the statement is going anyway.
     if !session.history.is_empty() {
         items.push(Item::command(
-            "Query history",
+            tr("Query history"),
             "",
             icon::HISTORY,
             Command::QueryHistory,
@@ -574,17 +575,22 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         } = &tab.body
         {
             items.push(if *showing_structure {
-                Item::command("Show data", "", icon::TABLE, Command::ShowStructure(false))
+                Item::command(
+                    tr("Show data"),
+                    "",
+                    icon::TABLE,
+                    Command::ShowStructure(false),
+                )
             } else {
                 Item::command(
-                    "Show structure",
+                    tr("Show structure"),
                     "",
                     icon::STRUCTURE,
                     Command::ShowStructure(true),
                 )
             });
             items.push(Item::command(
-                "Refresh rows",
+                tr("Refresh rows"),
                 chord_hint("refresh_relation", overrides),
                 icon::RUN,
                 Command::RefreshRelation(tab.id),
@@ -594,7 +600,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             if !*showing_structure {
                 if matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit) {
                     items.push(Item::command(
-                        "Next page",
+                        tr("Next page"),
                         "",
                         icon::CHEVRON_RIGHT,
                         Command::NextPage,
@@ -602,7 +608,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 }
                 if *offset > 0 {
                     items.push(Item::command(
-                        "Previous page",
+                        tr("Previous page"),
                         "",
                         icon::CHEVRON_LEFT,
                         Command::PreviousPage,
@@ -610,14 +616,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 }
                 if !count.answers(filter) {
                     items.push(Item::command(
-                        "Count rows",
+                        tr("Count rows"),
                         "",
                         icon::TABLE,
                         Command::CountRows(tab.id),
                     ));
                 }
                 items.push(Item::command(
-                    "Filter rows…",
+                    tr("Filter rows…"),
                     "",
                     icon::SEARCH,
                     Command::FilterRows,
@@ -625,20 +631,25 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 // A row that would do nothing is worse than no row at all.
                 if !filter.is_empty() {
                     items.push(Item::command(
-                        "Clear filter",
+                        tr("Clear filter"),
                         "",
                         icon::CLOSE,
                         Command::ClearFilter,
                     ));
                 }
                 if tab.takes_inserts(profile.config.engine()) {
-                    items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+                    items.push(Item::command(
+                        tr("New row…"),
+                        "",
+                        icon::PLUS,
+                        Command::NewRow,
+                    ));
                 }
                 // Only on a row dbdelve can name by its primary key -- the same
                 // condition that makes a cell of it editable.
                 if workspace.has_nameable_row(cx) {
                     items.push(Item::command(
-                        "Delete row…",
+                        tr("Delete row…"),
                         "",
                         icon::DELETE,
                         Command::DeleteRow,
@@ -647,7 +658,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             }
         }
         items.push(Item::command(
-            "Close tab",
+            tr("Close tab"),
             chord_hint("close_tab", overrides),
             icon::CLOSE,
             Command::CloseObject(tab.id),
@@ -658,25 +669,25 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // nothing has nothing to write out.
     if workspace.has_results(cx) {
         items.push(Item::command(
-            "Export results as CSV",
+            tr("Export results as CSV"),
             "",
             icon::SAVE,
             Command::ExportResults(Format::Csv),
         ));
         items.push(Item::command(
-            "Export results as JSON",
+            tr("Export results as JSON"),
             "",
             icon::SAVE,
             Command::ExportResults(Format::Json),
         ));
         items.push(Item::command(
-            "Copy results as TSV",
+            tr("Copy results as TSV"),
             chord_hint("copy_results", overrides),
             icon::COPY,
             Command::CopyResults(Format::Tsv),
         ));
         items.push(Item::command(
-            "Copy results as CSV",
+            tr("Copy results as CSV"),
             "",
             icon::COPY,
             Command::CopyResults(Format::Csv),
@@ -685,7 +696,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
 
     if workspace.has_active_cell(cx) {
         items.push(Item::command(
-            "Copy row",
+            tr("Copy row"),
             chord_hint("copy_row", overrides),
             icon::COPY,
             Command::CopyRow,
@@ -695,13 +706,13 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // Only where the ring is on a cell that can actually take one.
     if workspace.has_editable_cell(cx) {
         items.push(Item::command(
-            "Set cell to NULL",
+            tr("Set cell to NULL"),
             chord_hint("set_null", overrides),
             icon::RENAME,
             Command::SetNull,
         ));
         items.push(Item::command(
-            "Set cell to empty",
+            tr("Set cell to empty"),
             "",
             icon::RENAME,
             Command::SetEmpty,
@@ -710,7 +721,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         // known. The palette is reached from anywhere and knows no column; the
         // cell menu is the surface that hides what would be refused.
         items.push(Item::command(
-            "Set cell to default",
+            tr("Set cell to default"),
             "",
             icon::RENAME,
             Command::SetDefault,
@@ -721,25 +732,25 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // pair of buttons is conditional too.
     if workspace.has_pending_edits(cx) {
         items.push(Item::command(
-            "Apply edits",
+            tr("Apply edits"),
             "",
             icon::SAVE,
             Command::ApplyEdits,
         ));
         items.push(Item::command(
-            "Discard edits",
+            tr("Discard edits"),
             "",
             icon::DELETE,
             Command::DiscardEdits,
         ));
         items.push(Item::command(
-            "Next edit",
+            tr("Next edit"),
             "",
             icon::CHEVRON_RIGHT,
             Command::NextEdit,
         ));
         items.push(Item::command(
-            "Previous edit",
+            tr("Previous edit"),
             "",
             icon::CHEVRON_LEFT,
             Command::PreviousEdit,
@@ -753,7 +764,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             .enumerate()
             .filter(|(index, _)| *index != workspace.active && workspace.in_current_group(*index))
             .map(|(index, other)| Item {
-                label: format!("Switch to {}", other.name),
+                label: trf!("Switch to {}", other.name),
                 hint: "".into(),
                 icon: icon::DATABASE,
                 command: Command::SwitchProfile(index),
@@ -762,13 +773,13 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
 
     if workspace.current_group_members().len() > 1 {
         items.push(Item::command(
-            "Next connection",
+            tr("Next connection"),
             chord_hint("next_profile", overrides),
             icon::DATABASE,
             Command::NextProfile,
         ));
         items.push(Item::command(
-            "Previous connection",
+            tr("Previous connection"),
             chord_hint("previous_profile", overrides),
             icon::DATABASE,
             Command::PreviousProfile,
@@ -776,20 +787,20 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
 
     items.push(Item::command(
-        "New connection",
+        tr("New connection"),
         chord_hint("new_connection", overrides),
         icon::PLUS,
         Command::NewConnection,
     ));
     items.push(Item::command(
-        "New project",
+        tr("New project"),
         chord_hint("new_project", overrides),
         icon::ADD_TO_PROJECT,
         Command::NewProject,
     ));
     if Source::DBeaver.found() {
         items.push(Item::command(
-            "Import connections from DBeaver",
+            tr("Import connections from DBeaver"),
             chord_hint("import_dbeaver", overrides),
             icon::PLUS,
             Command::ImportConnections(Source::DBeaver),
@@ -797,36 +808,36 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
     if Source::TablePlus.found() {
         items.push(Item::command(
-            "Import connections from TablePlus",
+            tr("Import connections from TablePlus"),
             chord_hint("import_tableplus", overrides),
             icon::PLUS,
             Command::ImportConnections(Source::TablePlus),
         ));
     }
     items.push(Item::command(
-        "Refresh connection",
+        tr("Refresh connection"),
         chord_hint("refresh_connection", overrides),
         icon::DATABASE,
         Command::RefreshConnection,
     ));
     if profile.config.engine().switches_database() {
         items.push(Item::command(
-            "Select database",
+            tr("Select database"),
             chord_hint("select_database", overrides),
             icon::DATABASE,
             Command::SelectDatabase,
         ));
     }
     items.push(Item::command(
-        "Select theme",
+        tr("Select theme"),
         chord_hint("cycle_theme", overrides),
         icon::THEME,
         Command::SelectTheme,
     ));
     for (label, slot) in [
-        ("Chrome font", FontSlot::Chrome),
-        ("Editor font", FontSlot::Editor),
-        ("Grid font", FontSlot::Grid),
+        (tr("Chrome font"), FontSlot::Chrome),
+        (tr("Editor font"), FontSlot::Editor),
+        (tr("Grid font"), FontSlot::Grid),
     ] {
         items.push(Item::command(
             label,
@@ -836,7 +847,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
     items.push(Item::command(
-        "Settings",
+        tr("Settings"),
         chord_hint("open_settings", overrides),
         icon::SWITCHER,
         Command::OpenSettings,
@@ -844,20 +855,20 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // One row rather than a Show/Hide pair: the palette is built from the
     // session, which does not know whether the column is folded.
     items.push(Item::command(
-        "Toggle sidebar",
+        tr("Toggle sidebar"),
         chord_hint("toggle_sidebar", overrides),
         icon::SIDEBAR,
         Command::ToggleSidebar,
     ));
     items.push(Item::command(
-        "Toggle row panel",
+        tr("Toggle row panel"),
         chord_hint("toggle_row_panel", overrides),
         icon::ROW_PANEL,
         Command::ToggleRowPanel,
     ));
     if matches!(session.active, Tab::Query(_)) {
         items.push(Item::command(
-            "Reset editor zoom",
+            tr("Reset editor zoom"),
             chord_hint("reset_editor_zoom", overrides),
             icon::SEARCH,
             Command::ResetEditorZoom,
@@ -868,13 +879,13 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
 
 fn kind_label(kind: ObjectKind) -> &'static str {
     match kind {
-        ObjectKind::Relation(RelationKind::Table) => "table",
-        ObjectKind::Relation(RelationKind::PartitionedTable) => "partitioned table",
-        ObjectKind::Relation(RelationKind::View) => "view",
-        ObjectKind::Relation(RelationKind::MaterializedView) => "materialized view",
-        ObjectKind::Relation(RelationKind::ForeignTable) => "foreign table",
-        ObjectKind::Routine(RoutineKind::Function) => "function",
-        ObjectKind::Routine(RoutineKind::Procedure) => "procedure",
+        ObjectKind::Relation(RelationKind::Table) => tr("table"),
+        ObjectKind::Relation(RelationKind::PartitionedTable) => tr("partitioned table"),
+        ObjectKind::Relation(RelationKind::View) => tr("view"),
+        ObjectKind::Relation(RelationKind::MaterializedView) => tr("materialized view"),
+        ObjectKind::Relation(RelationKind::ForeignTable) => tr("foreign table"),
+        ObjectKind::Routine(RoutineKind::Function) => tr("function"),
+        ObjectKind::Routine(RoutineKind::Procedure) => tr("procedure"),
     }
 }
 

@@ -5,6 +5,7 @@
 //! changes, so its tabs, saved queries and history come back as they were.
 
 use super::*;
+use crate::i18n::{tr, trf};
 
 impl Workspace {
     /// The project a connection is in, by name, or `None` for No project.
@@ -164,7 +165,7 @@ impl Workspace {
     ) {
         let prefill = renaming.clone().unwrap_or_default();
         let input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("Project name");
+            let mut input = InputState::new(window, cx).placeholder(tr("Project name"));
             input.set_value(prefill, window, cx);
             input
         });
@@ -242,10 +243,10 @@ impl Workspace {
     /// may keep.
     fn name_refused(&mut self, name: &str, keeping: Option<&str>, cx: &mut Context<Self>) -> bool {
         let message = if name.is_empty() {
-            "A project needs a name.".to_string()
+            tr("A project needs a name.").to_string()
         } else if Some(name) != keeping && self.projects.iter().any(|project| project.name == name)
         {
-            format!("A project named {name} already exists.")
+            trf!("A project named {} already exists.", name)
         } else {
             return false;
         };
@@ -382,7 +383,7 @@ pub(crate) fn chosen_project(
     projects: &[store::StoredProject],
 ) -> Result<Option<String>, String> {
     match typed.map(str::trim) {
-        Some("") => Err("A project needs a name.".to_string()),
+        Some("") => Err(tr("A project needs a name.").to_string()),
         Some(name) => Ok(Some(name.to_string())),
         None => Ok(picked
             .filter(|picked| projects.iter().any(|project| project.name == *picked))

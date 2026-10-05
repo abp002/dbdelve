@@ -34,6 +34,7 @@ use super::{
     assemble_references, assemble_sizes, assemble_structure, non_utf8_error, plain_error,
     required_cell,
 };
+use crate::i18n::{tr, trf};
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
 /// resolves but drops packets pins the UI in "Connecting…" for minutes with no
@@ -415,7 +416,7 @@ impl Connection {
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
             .map_err(|error| DbError {
-                message: format!("Could not ask the server to cancel: {error}"),
+                message: trf!("Could not ask the server to cancel: {}", error),
                 position: None,
             })
     }
@@ -437,7 +438,7 @@ impl Connection {
 
     fn run(&self, sql: &str, editable: bool) -> Result<QueryResult, DbError> {
         let mut connection = self.connection.lock().map_err(|_| DbError {
-            message: "The connection is unavailable after an earlier internal failure.".into(),
+            message: tr("The connection is unavailable after an earlier internal failure.").into(),
             position: None,
         })?;
 
@@ -614,7 +615,7 @@ impl Connection {
             .first()
             .and_then(|row| row.get(1)?.as_deref())
             .map(|definition| format!("{definition};"))
-            .ok_or_else(|| plain_error(format!("{schema}.{relation} has no definition to show.")))
+            .ok_or_else(|| plain_error(trf!("{}.{} has no definition to show.", schema, relation)))
     }
 }
 
@@ -866,10 +867,8 @@ fn ssl_options(server: &ServerConfig) -> Option<SslOpts> {
 /// offers no way to name another, so through a tunnel verify-full could only
 /// ever check the name against the loopback address (AGENTS.md, hard rule 7).
 fn unverifiable_through_a_tunnel(server: &ServerConfig, engine: Engine) -> DbError {
-    plain_error(format!(
-        "sslmode=verify-full cannot be honoured through an SSH tunnel on {}: \
-         the driver checks the certificate against the address it dials, which is \
-         the tunnel's loopback address rather than {}.",
+    plain_error(trf!(
+        "sslmode=verify-full cannot be honoured through an SSH tunnel on {}: the driver checks the certificate against the address it dials, which is the tunnel's loopback address rather than {}.",
         engine.label(),
         server.host
     ))
@@ -882,7 +881,7 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
     if let ::mysql::Error::IoError(io) = error
         && io.kind() == std::io::ErrorKind::ConnectionRefused
     {
-        return plain_error(format!(
+        return plain_error(trf!(
             "Connection refused: nothing is listening on {}",
             server.endpoint()
         ));
@@ -926,9 +925,9 @@ fn rolled_back(connection: &mut Conn, sql: &str, error: DbError) -> DbError {
     }
 
     let outcome = match connection.query_drop("ROLLBACK") {
-        Ok(()) => "The transaction the batch opened was rolled back; nothing it wrote remains."
+        Ok(()) => tr("The transaction the batch opened was rolled back; nothing it wrote remains.")
             .to_string(),
-        Err(failure) => format!(
+        Err(failure) => trf!(
             "The transaction the batch opened is still open: the rollback failed too. {}",
             describe(&failure)
         ),

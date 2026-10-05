@@ -22,6 +22,7 @@ use crate::{
     actions::RefreshConnection,
     db::{RelationKind, RoutineKind},
     explorer::ObjectKind,
+    i18n::{tr, trf},
     icons::icon,
     keybindings,
     session::ProfileState,
@@ -101,7 +102,7 @@ pub(crate) fn status_dot(t: Theme, state: &ProfileState) -> Div {
 /// The way back from a failed or dropped connection, wherever that failure is
 /// on screen: beside the status bar's message and under a query's error.
 pub(crate) fn reconnect_button(id: &'static str, t: Theme) -> Button {
-    button(id, "Reconnect", Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
+    button(id, tr("Reconnect"), Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
         window.dispatch_action(Box::new(RefreshConnection), cx);
     })
 }
@@ -138,7 +139,7 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
                 .text_color(t.text)
                 .font_weight(FontWeight::MEDIUM)
                 .child(row_icon_tinted(t, path, Some(color)))
-                .child(mode.label())
+                .child(tr(mode.label()))
                 .child(row_icon(t, icon::CHEVRON_DOWN)),
         )
 }
@@ -155,7 +156,7 @@ pub(crate) fn update_pill(t: Theme, version: &str) -> Button {
                 .gap(px(layout::SPACE_XS))
                 .text_size(px(layout::chrome(layout::TEXT_XS)))
                 .text_color(t.text_muted)
-                .child(format!("DBDelve {version} available"))
+                .child(trf!("DBDelve {} available", version))
                 .child(row_icon(t, icon::CHEVRON_DOWN)),
         )
 }
@@ -532,12 +533,13 @@ pub(crate) fn group_digits(digits: &str) -> String {
 /// and "20,000 rows" over 5,000 of them is a number nobody can act on. Every
 /// other result reads as the plain count it always did.
 pub(crate) fn row_readout(showing: usize, total: usize) -> String {
-    let unit = if total == 1 { "row" } else { "rows" };
+    let unit = if total == 1 { tr("row") } else { tr("rows") };
     if showing < total {
-        return format!(
-            "{} of {} {unit}",
+        return trf!(
+            "{} of {} {}",
             group_thousands(showing as u64),
-            group_thousands(total as u64)
+            group_thousands(total as u64),
+            unit
         );
     }
     format!("{} {unit}", group_thousands(total as u64))
@@ -548,7 +550,7 @@ pub(crate) fn row_readout(showing: usize, total: usize) -> String {
 /// difference between 121 and 122 minutes.
 pub(crate) fn relative_age(seconds: u64) -> String {
     match seconds {
-        ..60 => "moments".to_string(),
+        ..60 => tr("moments").to_string(),
         60..3_600 => format!("{}m", seconds / 60),
         3_600..86_400 => format!("{}h", seconds / 3_600),
         _ => format!("{}d", seconds / 86_400),

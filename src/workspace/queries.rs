@@ -6,6 +6,7 @@
 use std::ops::Range;
 
 use super::*;
+use crate::i18n::{tr, trf};
 use crate::session::{Finished, PendingRun, Queue, Resume, Step, TabKey, next_step};
 
 impl Workspace {
@@ -190,7 +191,7 @@ impl Workspace {
             refused => {
                 let message = refused
                     .and_then(Result::err)
-                    .unwrap_or_else(|| "There is no statement to run.".into());
+                    .unwrap_or_else(|| tr("There is no statement to run.").into());
                 self.refuse_run(tab, message, cx);
                 return;
             }
@@ -367,7 +368,7 @@ impl Workspace {
                     // A set after the first has no statement of its own to be
                     // named after: one batch produced them all, and the chip
                     // says which of its results this is.
-                    sql: format!("Result {}", offset + 2),
+                    sql: trf!("Result {}", offset + 2),
                     start,
                     state: QueryState::Complete {
                         rows: set.rows.len(),
@@ -395,15 +396,17 @@ impl Workspace {
             });
         }
         if dropped > 0 {
-            let (sets, them) = match dropped {
-                1 => ("set", "it is"),
-                _ => ("sets", "they are"),
-            };
             self.note(
-                format!(
-                    "The batch returned {dropped} more result {sets} than there were grids \
-                     reserved for it, and {them} not shown."
-                ),
+                match dropped {
+                    1 => trf!(
+                        "The batch returned {} more result set than there were grids reserved for it, and it is not shown.",
+                        dropped
+                    ),
+                    _ => trf!(
+                        "The batch returned {} more result sets than there were grids reserved for it, and they are not shown.",
+                        dropped
+                    ),
+                },
                 cx,
             );
         }
@@ -632,7 +635,7 @@ impl Workspace {
             // which is what `explain_prefix` returning `None` is there to stop.
             failure(
                 self,
-                &format!(
+                &trf!(
                     "{} cannot {}.",
                     engine.label(),
                     action.mode.label().to_lowercase()
@@ -644,7 +647,7 @@ impl Workspace {
         let (start, sql) = match self.sql_to_run(&editor, cx) {
             Some(Ok(statement)) => statement,
             Some(Err(message)) => return failure(self, &message, cx),
-            None => return failure(self, "There is no statement to explain.", cx),
+            None => return failure(self, tr("There is no statement to explain."), cx),
         };
         if let Err(message) = sql::explainable(engine, &sql) {
             return failure(self, &message, cx);
@@ -721,7 +724,7 @@ impl Workspace {
         // nowhere to go has to ask for a name.
         if self.named() {
             match self.persist_buffer(cx) {
-                Ok(()) => self.note("Saved query.".into(), cx),
+                Ok(()) => self.note(tr("Saved query.").into(), cx),
                 Err(message) => self.note(message, cx),
             }
             return;
@@ -801,7 +804,7 @@ impl Workspace {
         if previous.as_deref() != Some(name.as_str())
             && profile.session.saved_queries.contains(&name)
         {
-            self.note(format!("A query named {name} already exists."), cx);
+            self.note(trf!("A query named {} already exists.", name), cx);
             return;
         }
 
@@ -850,7 +853,7 @@ impl Workspace {
             }
         }
         if let Some(profile) = self.profile_mut() {
-            profile.session.notice = Some(format!("Saved {name}."));
+            profile.session.notice = Some(trf!("Saved {}.", name));
         }
         self.remember_profiles(cx);
         cx.notify();
@@ -962,7 +965,7 @@ impl Workspace {
             Ok(Some(_)) => {}
             Ok(None) => {
                 profile.session.saved_queries = store::saved_queries(&profile_id);
-                profile.session.notice = Some(format!("{name} no longer exists."));
+                profile.session.notice = Some(trf!("{} no longer exists.", name));
                 cx.notify();
                 return;
             }
@@ -1105,7 +1108,7 @@ impl Workspace {
             profile.session.saved_queries = store::saved_queries(&id);
             profile.session.pending_delete = None;
             profile.session.pending_close = None;
-            profile.session.notice = Some(format!("Deleted {name}."));
+            profile.session.notice = Some(trf!("Deleted {}.", name));
 
             // The tab goes with the file. Its text was the query, and the query
             // is what was deleted -- keeping it in an untitled buffer would
@@ -1229,7 +1232,7 @@ impl Workspace {
 
         let Some(connection) = connection else {
             *state = QueryState::Failed(DbError {
-                message: "The connection is not open.".into(),
+                message: tr("The connection is not open.").into(),
                 position: None,
             });
             cx.notify();
@@ -1402,7 +1405,7 @@ impl Workspace {
                         // Before `slot`: a tab closed mid-run still ran on the
                         // session that died.
                         if lost {
-                            profile.state = ProfileState::Failed(format!(
+                            profile.state = ProfileState::Failed(trf!(
                                 "Connection to {} was lost.",
                                 profile.config.endpoint()
                             ));

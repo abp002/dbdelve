@@ -36,6 +36,7 @@ use super::{
     ServerConfig, SslMode, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
     assemble_references, assemble_structure, create_table, plain_error, required_cell, terminated,
 };
+use crate::i18n::{tr, trf};
 
 const DATABASES_SQL: &str = "
 SELECT name, CASE WHEN name = DB_NAME() THEN 1 ELSE 0 END AS is_current
@@ -580,8 +581,7 @@ impl Connection {
                 connection.server.database = current_database(&mut session).map_err(|error| {
                     match error.message.is_empty() {
                         true => plain_error(
-                            "The connection closed while asking which database the login landed \
-                             in."
+                            tr("The connection closed while asking which database the login landed in.")
                             .into(),
                         ),
                         false => error,
@@ -600,7 +600,7 @@ impl Connection {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
+            .map_err(|error| plain_error(trf!("Could not start the connection: {}", error)))?;
 
         let dial = self.tunnel.as_deref().map(Tunnel::dial).transpose()?;
         let attempt =
@@ -649,7 +649,7 @@ impl Connection {
         if let Some(socket) = &in_flight.socket {
             socket
                 .shutdown(Shutdown::Both)
-                .map_err(|error| plain_error(format!("Could not cancel: {error}")))?;
+                .map_err(|error| plain_error(trf!("Could not cancel: {}", error)))?;
         }
         Ok(())
     }
@@ -694,12 +694,12 @@ impl Connection {
             std::mem::take(&mut in_flight.cancel_queued)
         };
         let mut guard = locked.map_err(|_| DbError {
-            message: "The connection is unavailable after an earlier internal failure.".into(),
+            message: tr("The connection is unavailable after an earlier internal failure.").into(),
             position: None,
         })?;
         if cancelled {
             return Err(plain_error(
-                "Cancelled before it started: nothing was sent to the server.".into(),
+                tr("Cancelled before it started: nothing was sent to the server.").into(),
             ));
         }
         connected?;
@@ -723,30 +723,30 @@ impl Connection {
             // The server has no statement timeout, so the timer is dbdelve's,
             // and what it stops has to be stopped the way Cancel stops it.
             let what = match (ran, lost) {
-                (None, Some(Lost::TimedOut)) => format!(
-                    "The statement ran past the {limit}-second statement timeout and was stopped \
-                     by closing its connection."
+                (None, Some(Lost::TimedOut)) => trf!(
+                    "The statement ran past the {}-second statement timeout and was stopped by closing its connection.",
+                    limit
                 ),
                 (None, Some(Lost::Panicked(message))) => message,
                 (None, None) => {
-                    "Cancelled: the statement was stopped by closing its connection.".into()
+                    tr("Cancelled: the statement was stopped by closing its connection.").into()
                 }
                 // What dbdelve asks after the statement is what was stopped,
                 // and the statement's own work stands.
                 (Some(ran), lost) => {
                     let outcome = match ran.result {
-                        Ok(_) => "The statement finished".to_string(),
-                        Err(error) => format!("{}\n\nThe statement failed", error.message),
+                        Ok(_) => tr("The statement finished").to_string(),
+                        Err(error) => trf!("{}\n\nThe statement failed", error.message),
                     };
                     let after = match lost {
-                        Some(Lost::TimedOut) => format!(
-                            "a query dbdelve sends after it ran past the {limit}-second statement \
-                             timeout."
+                        Some(Lost::TimedOut) => trf!(
+                            "a query dbdelve sends after it ran past the {}-second statement timeout.",
+                            limit
                         ),
-                        Some(Lost::Panicked(message)) => format!("then {message}"),
-                        None => "Cancel arrived after that.".into(),
+                        Some(Lost::Panicked(message)) => trf!("then {}", message),
+                        None => tr("Cancel arrived after that.").into(),
                     };
-                    format!("{outcome}, but {after}")
+                    trf!("{}, but {}", outcome, after)
                 }
             };
             return Err(self.stop(&mut guard, what));
@@ -879,14 +879,15 @@ impl Connection {
             let _ = socket.shutdown(Shutdown::Both);
         }
         *session = None;
-        let lost = "The connection was reset: the server rolled back any transaction that was \
-                    open, and temporary tables and SET options are gone with the session.";
+        let lost = tr(
+            "The connection was reset: the server rolled back any transaction that was open, and temporary tables and SET options are gone with the session.",
+        );
         let reconnected = match self.connect() {
             Ok(fresh) => {
                 *session = Some(fresh);
-                "dbdelve reconnected.".to_string()
+                tr("dbdelve reconnected.").to_string()
             }
-            Err(error) => format!("Reconnecting failed: {}", error.message),
+            Err(error) => trf!("Reconnecting failed: {}", error.message),
         };
         plain_error(format!("{what} {lost} {reconnected}"))
     }
@@ -988,13 +989,17 @@ impl Connection {
                 .first()
                 .and_then(|row| row.first()?.as_deref())
                 .map(terminated)
-                .ok_or_else(|| plain_error(format!("{name} has no definition to show.")));
+                .ok_or_else(|| plain_error(trf!("{} has no definition to show.", name)));
         }
 
         let structure = self.structure_for(schema, relation, true)?;
         // Every SQL Server table has a column, so none means no such table.
         if structure.columns.is_empty() {
-            return Err(plain_error(format!("{schema} has no relation {relation}.")));
+            return Err(plain_error(trf!(
+                "{} has no relation {}.",
+                schema,
+                relation
+            )));
         }
         Ok(create_table(
             Engine::SqlServer,
@@ -1023,7 +1028,7 @@ fn guarded<T>(call: impl FnOnce() -> T) -> Result<T, DbError> {
             .map(|text| text.to_string())
             .or_else(|| panic.downcast_ref::<String>().cloned())
             .unwrap_or_default();
-        plain_error(format!("The SQL Server driver failed: {detail}"))
+        plain_error(trf!("The SQL Server driver failed: {}", detail))
     })
 }
 
@@ -1078,9 +1083,10 @@ async fn login(
     .await
     .map_err(|_| tiberius::error::Error::Io {
         kind: std::io::ErrorKind::TimedOut,
-        message: format!(
-            "No answer from {} within {CONNECT_TIMEOUT_SECONDS} seconds.",
-            server.endpoint()
+        message: trf!(
+            "No answer from {} within {} seconds.",
+            server.endpoint(),
+            CONNECT_TIMEOUT_SECONDS
         ),
     })?
 }
@@ -1159,15 +1165,14 @@ fn unreadable_error(columns: &[(usize, String, String)]) -> String {
     let named = columns
         .iter()
         .map(|(index, name, kind)| match name.is_empty() {
-            true => format!("column {} ({kind})", index + 1),
+            true => trf!("column {} ({})", index + 1, kind),
             false => format!("{name} ({kind})"),
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
-        "The statement was not run: its result would hold {named}, which the SQL Server driver \
-         cannot read. A CLR type such as geography reads as text through .ToString(), and \
-         sql_variant through CAST(… AS nvarchar(4000))."
+    trf!(
+        "The statement was not run: its result would hold {}, which the SQL Server driver cannot read. A CLR type such as geography reads as text through .ToString(), and sql_variant through CAST(… AS nvarchar(4000)).",
+        named
     )
 }
 
@@ -1627,7 +1632,7 @@ fn connect_error(error: &tiberius::error::Error, server: &ServerConfig) -> DbErr
     if let tiberius::error::Error::Io { kind, .. } = error
         && *kind == std::io::ErrorKind::ConnectionRefused
     {
-        return plain_error(format!(
+        return plain_error(trf!(
             "Connection refused: nothing is listening on {}",
             server.endpoint()
         ));
@@ -1706,10 +1711,11 @@ fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError
         return Ok(());
     }
     ask(session, &format!("USE [{}]", database.replace(']', "]]")))?;
-    Err(plain_error(format!(
-        "The statement moved the session to database {current}, and dbdelve moved it back to \
-         {database}: this connection's explorer, and every statement dbdelve writes, name \
-         {database}'s objects."
+    Err(plain_error(trf!(
+        "The statement moved the session to database {}, and dbdelve moved it back to {}: this connection's explorer, and every statement dbdelve writes, name {}'s objects.",
+        current,
+        database,
+        database
     )))
 }
 
@@ -1756,18 +1762,23 @@ fn transaction_outcome(
         // opened all of them.
         match bracketed && before == 0 {
             true => match ask("ROLLBACK") {
-                Some(_) => "The transaction was rolled back: nothing the batch wrote remains.",
-                None => "The transaction the batch opened is still open: the rollback failed too.",
+                Some(_) => tr("The transaction was rolled back: nothing the batch wrote remains."),
+                None => {
+                    tr("The transaction the batch opened is still open: the rollback failed too.")
+                }
             },
-            false => "The transaction the batch began is still open.",
+            false => tr("The transaction the batch began is still open."),
         }
     } else if after == 0 && before > 0 {
-        "The transaction that was open before this statement was rolled back, and everything \
-         written in it is gone."
+        tr(
+            "The transaction that was open before this statement was rolled back, and everything written in it is gone.",
+        )
     } else if bracketed {
         match before {
-            0 => "The transaction did not commit: nothing the batch wrote remains.",
-            _ => "Nothing the batch wrote remains, and the transaction open before it still is.",
+            0 => tr("The transaction did not commit: nothing the batch wrote remains."),
+            _ => {
+                tr("Nothing the batch wrote remains, and the transaction open before it still is.")
+            }
         }
     } else {
         return error;

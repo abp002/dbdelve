@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::i18n::{tr, trf};
 use crate::session::{StaleEdit, StaleResume, refreshing};
 
 impl Workspace {
@@ -43,7 +44,7 @@ impl Workspace {
             return;
         };
         if !tab.takes_inserts(self.engine()) {
-            self.note("This view takes no inserts.".into(), cx);
+            self.note(tr("This view takes no inserts.").into(), cx);
             return;
         }
         // The columns are the form: without them there is nothing to draw, and
@@ -52,7 +53,7 @@ impl Workspace {
         // Structure showing rather than switching to Data for nothing.
         let StructureState::Loaded(structure) = structure else {
             self.note(
-                "DBDelve has not read this relation's columns yet.".into(),
+                tr("DBDelve has not read this relation's columns yet.").into(),
                 cx,
             );
             return;
@@ -159,7 +160,8 @@ impl Workspace {
         // a bug in dbdelve rather than a user error -- so it is said and not run.
         if !sql::is_generated_write_on(engine, &statement) {
             self.note(
-                "dbdelve refused to run a statement it wrote itself: it is not an INSERT.".into(),
+                tr("dbdelve refused to run a statement it wrote itself: it is not an INSERT.")
+                    .into(),
                 cx,
             );
             return;
@@ -285,7 +287,7 @@ impl Workspace {
             return;
         }
         let Some(page) = typed_page(&typed) else {
-            self.note(format!("{typed} is not a page number."), cx);
+            self.note(trf!("{} is not a page number.", typed), cx);
             return;
         };
         self.requery_relation(
@@ -388,7 +390,7 @@ impl Workspace {
         // would write again.
         if !sql::rerunnable(engine, &last_query) {
             self.note(
-                "These rows came from a statement that writes, and sorting would run it again."
+                tr("These rows came from a statement that writes, and sorting would run it again.")
                     .into(),
                 cx,
             );
@@ -409,7 +411,7 @@ impl Workspace {
         // another statement entirely, and one that never ran.
         let Some(range) = Buffer::for_engine(engine, &text).find(&text, cursor, &last_query) else {
             self.note(
-                "The statement behind these rows is no longer in the editor.".into(),
+                tr("The statement behind these rows is no longer in the editor.").into(),
                 cx,
             );
             return;
@@ -418,7 +420,7 @@ impl Workspace {
 
         let Some(mut keys) = sql::order_by(engine, statement) else {
             self.note(
-                format!(
+                trf!(
                     "dbdelve cannot add {} to this statement without rewriting it.",
                     engine.sort_clause()
                 ),
@@ -429,7 +431,7 @@ impl Workspace {
         cycle(&mut keys, &expression);
         let Some(sorted) = sql::with_order_by(engine, statement, &keys) else {
             self.note(
-                format!("This statement cannot carry {}.", engine.sort_clause()),
+                trf!("This statement cannot carry {}.", engine.sort_clause()),
                 cx,
             );
             return;
@@ -508,19 +510,19 @@ impl Workspace {
             });
         self.note(
             match (traced, wrote, snapshot) {
-                (true, _, _) => "This column cannot be edited.".into(),
+                (true, _, _) => tr("This column cannot be edited.").into(),
                 (false, true, _) => {
-                    "These rows came from a statement that writes. Fetch them with a query that only reads to edit them.".into()
+                    tr("These rows came from a statement that writes. Fetch them with a query that only reads to edit them.").into()
                 }
                 (false, false, true) => match tab {
                     Tab::Query(_) => {
-                        "These rows are from an earlier session. Run the query again to edit them."
+                        tr("These rows are from an earlier session. Run the query again to edit them.")
                             .into()
                     }
-                    _ => "These rows are from an earlier session. Refresh them to edit.".into(),
+                    _ => tr("These rows are from an earlier session. Refresh them to edit.").into(),
                 },
                 (false, false, false) => {
-                    "dbdelve cannot tell which table these rows come from.".into()
+                    tr("dbdelve cannot tell which table these rows come from.").into()
                 }
             },
             cx,
@@ -592,7 +594,7 @@ impl Workspace {
         if !self.require(Mode::ReadWrite, cx) {
             return;
         }
-        self.note("This column cannot be edited.".into(), cx);
+        self.note(tr("This column cannot be edited.").into(), cx);
     }
 
     /// Whether an edit may go ahead on the grid in front: not while its rows are
@@ -656,7 +658,7 @@ impl Workspace {
         });
         match rerun {
             Some((_, statement)) if !sql::rerunnable(self.engine(), &statement) => self.note(
-                "These rows came from a statement that writes, and refreshing would run it again."
+                tr("These rows came from a statement that writes, and refreshing would run it again.")
                     .into(),
                 cx,
             ),
@@ -746,7 +748,10 @@ impl Workspace {
             .as_ref()
             .is_some_and(|form| form.tab == profile.session.active)
         {
-            self.note("Close the new row form before deleting a row.".into(), cx);
+            self.note(
+                tr("Close the new row form before deleting a row.").into(),
+                cx,
+            );
             return;
         }
         // Browsing surfaces only. A query tab's grid is a view of the user's own
@@ -755,7 +760,7 @@ impl Workspace {
         let tab = profile.session.active;
         if !matches!(tab, Tab::Object(_)) {
             self.note(
-                "Deleting a row is offered on a table's rows, not on a query's results.".into(),
+                tr("Deleting a row is offered on a table's rows, not on a query's results.").into(),
                 cx,
             );
             return;
@@ -772,7 +777,8 @@ impl Workspace {
         });
         let Some(((schema, table, keys), types)) = key else {
             self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
+                tr("dbdelve cannot name this row by its primary key, so it will not delete it.")
+                    .into(),
                 cx,
             );
             return;
@@ -787,7 +793,8 @@ impl Workspace {
             .collect();
         let Some(statement) = sql::delete_row(engine, &schema, &table, &borrowed, &types) else {
             self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
+                tr("dbdelve cannot name this row by its primary key, so it will not delete it.")
+                    .into(),
                 cx,
             );
             return;
@@ -802,8 +809,7 @@ impl Workspace {
             || !sql::delete_matches_key_on(engine, &statement, &columns)
         {
             self.note(
-                "dbdelve refused to run a statement it wrote itself: it is not a DELETE of one row \
-                 by its primary key."
+                tr("dbdelve refused to run a statement it wrote itself: it is not a DELETE of one row by its primary key.")
                     .into(),
                 cx,
             );
@@ -892,7 +898,7 @@ impl Workspace {
     /// rules: the rows the server returned, no pending edits, and a capped
     /// snapshot refused rather than copied short.
     pub(crate) fn copy_results_as(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot("copying", cx) {
+        if self.refuse_capped_snapshot(tr("copying"), cx) {
             return;
         }
         let Some(results) = self
@@ -910,12 +916,15 @@ impl Workspace {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         // A copy changes nothing on screen, and a whole result set is too much
         // to take on trust. Unlike a refusal, the confirmation goes by itself.
-        let message = format!(
-            "Copied {} {} as {}.",
+        let (count, kind) = (
             group_thousands(rows as u64),
-            if rows == 1 { "row" } else { "rows" },
-            format.extension().to_uppercase()
+            format.extension().to_uppercase(),
         );
+        let message = if rows == 1 {
+            trf!("Copied {} row as {}.", count, kind)
+        } else {
+            trf!("Copied {} rows as {}.", count, kind)
+        };
         self.note(message.clone(), cx);
         if let Some(profile) = self.profile() {
             let (id, generation) = (profile.id.clone(), profile.generation);
@@ -963,10 +972,11 @@ impl Workspace {
             return false;
         };
         self.note(
-            format!(
-                "This tab is showing {} of {} rows from a snapshot. Refresh it before {doing}.",
+            trf!(
+                "This tab is showing {} of {} rows from a snapshot. Refresh it before {}.",
                 group_thousands(showing as u64),
-                group_thousands(total as u64)
+                group_thousands(total as u64),
+                doing
             ),
             cx,
         );
@@ -1051,7 +1061,7 @@ impl Workspace {
     /// read it off. Pending edits are not written either: this is the result set
     /// the server returned, and applying them is a separate, visible act.
     pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot("exporting", cx) {
+        if self.refuse_capped_snapshot(tr("exporting"), cx) {
             return;
         }
         let Some(profile) = self.profile() else {
@@ -1107,7 +1117,7 @@ impl Workspace {
                     let text = export::render(format, &result);
                     match std::fs::write(&path, text) {
                         Ok(()) => Ok((path, format)),
-                        Err(error) => Err(format!("Could not write {}: {error}", path.display())),
+                        Err(error) => Err(trf!("Could not write {}: {}", path.display(), error)),
                     }
                 })
                 .await;
@@ -1121,13 +1131,15 @@ impl Workspace {
                 };
                 match written {
                     Ok((path, format)) => {
-                        let message = format!(
-                            "Exported {} {} as {} to {}.",
+                        let (count, kind) = (
                             group_thousands(rows as u64),
-                            if rows == 1 { "row" } else { "rows" },
                             format.extension().to_uppercase(),
-                            path.display()
                         );
+                        let message = if rows == 1 {
+                            trf!("Exported {} row as {} to {}.", count, kind, path.display())
+                        } else {
+                            trf!("Exported {} rows as {} to {}.", count, kind, path.display())
+                        };
                         profile.session.notice = Some(message.clone());
                         workspace.clear_notice_later(id, generation, message, cx);
                     }
@@ -1174,7 +1186,8 @@ impl Workspace {
         // error.
         if !sql::is_generated_write_on(self.engine(), &batch) {
             self.note(
-                "dbdelve refused to run a statement it wrote itself: it is not an UPDATE.".into(),
+                tr("dbdelve refused to run a statement it wrote itself: it is not an UPDATE.")
+                    .into(),
                 cx,
             );
             return;
@@ -1216,7 +1229,7 @@ impl Workspace {
         let (id, editor) = (tab.id, tab.editor.clone());
         let Some(select) = tab.last_query.clone() else {
             self.note(
-                "dbdelve does not know which statement produced these rows.".into(),
+                tr("dbdelve does not know which statement produced these rows.").into(),
                 cx,
             );
             return;

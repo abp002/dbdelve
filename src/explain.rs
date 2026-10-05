@@ -13,6 +13,8 @@
 //! no sense becomes a node carrying its own raw text, and a metric that does
 //! not parse stays in the label where the user can still read it.
 
+use crate::i18n::tr;
+
 /// A parsed EXPLAIN, ready to render.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Plan {
@@ -231,9 +233,9 @@ fn plan_of(holder: &mongodb::bson::Document, depth: usize, plan: &mut Plan) {
     }
     if let Ok(stats) = holder.get_document("executionStats") {
         for (label, key) in [
-            ("Documents returned", "nReturned"),
-            ("Keys examined", "totalKeysExamined"),
-            ("Documents examined", "totalDocsExamined"),
+            (tr("Documents returned"), "nReturned"),
+            (tr("Keys examined"), "totalKeysExamined"),
+            (tr("Documents examined"), "totalDocsExamined"),
         ] {
             if let Some(value) = stats.get(key).and_then(millis) {
                 plan.summary.push((label.into(), value.to_string()));

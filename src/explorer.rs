@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use gpui_component::tree::TreeItem;
 
 use crate::db::{Catalog, Engine, Relation, RelationKind, Routine, RoutineKind, Schema};
+use crate::i18n::tr;
 use crate::mql;
 
 /// The row counts a preview can be asked for, and the one it opens with. Every
@@ -241,7 +242,7 @@ fn relation_item(
 }
 
 fn category(label: &'static str, schema_index: usize, children: Vec<TreeItem>) -> TreeItem {
-    TreeItem::new(format!("category-{label}-{schema_index}"), label)
+    TreeItem::new(format!("category-{label}-{schema_index}"), tr(label))
         .expanded(true)
         .children(children)
 }

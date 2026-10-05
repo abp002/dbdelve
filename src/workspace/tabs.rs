@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::i18n::trf;
 use crate::tab_drag::{self, Drag, Slot};
 
 impl Workspace {
@@ -180,7 +181,7 @@ impl Workspace {
         // chrome should not narrate a setting -- so the switch itself says
         // where it landed.
         if self.profile().is_some() {
-            self.note(format!("Theme: {}", theme.name), cx);
+            self.note(trf!("Theme: {}", theme.name), cx);
         }
         self.remember_profiles(cx);
         cx.refresh_windows();

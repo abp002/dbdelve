@@ -10,6 +10,7 @@ mod tableplus;
 
 use serde::Deserialize;
 
+use crate::i18n::{tr, trf};
 use crate::{
     db::{ConnectionConfig, Engine, MongoConfig, ServerConfig, SslMode},
     theme::ConnectionColor,
@@ -90,7 +91,7 @@ pub(super) fn mongo_url(url: &str, user: &str, password: &str) -> Result<Connect
     let url = url.strip_prefix("jdbc:").unwrap_or(url);
     let mut config = ConnectionConfig::from_url(url)?;
     if config.engine() != Engine::MongoDb {
-        return Err("its URL isn't a MongoDB one".into());
+        return Err(tr("its URL isn't a MongoDB one").into());
     }
     if let Some(server) = config.server_mut() {
         if server.user.is_empty() {
@@ -109,8 +110,10 @@ pub(super) fn port(label: &str, value: Option<String>, notes: &mut Vec<String>) 
     let value = value?;
     match value.parse() {
         Ok(0) | Err(_) => {
-            notes.push(format!(
-                "{label} {value} isn't a port number, so it was left blank"
+            notes.push(trf!(
+                "{} {} isn't a port number, so it was left blank",
+                label,
+                value
             ));
             None
         }
@@ -176,7 +179,7 @@ pub(super) fn root_certificate(
     if sslmode.checks_certificate() {
         return Some(path);
     }
-    notes.push(format!(
+    notes.push(trf!(
         "CA certificate left off: SSL mode {} doesn't check one",
         sslmode.as_str()
     ));
@@ -189,11 +192,13 @@ impl Report {
         let label = source.label();
         let mut parts = Vec::new();
         match self.imported.len() {
-            0 if self.skipped.is_empty() => parts.push(format!("No {label} connections found.")),
-            0 => parts.push(format!("Imported nothing from {label}.")),
-            1 => parts.push(format!("Imported 1 connection from {label}, read-only.")),
-            count => parts.push(format!(
-                "Imported {count} connections from {label}, all read-only."
+            0 if self.skipped.is_empty() => parts.push(trf!("No {} connections found.", label)),
+            0 => parts.push(trf!("Imported nothing from {}.", label)),
+            1 => parts.push(trf!("Imported 1 connection from {}, read-only.", label)),
+            count => parts.push(trf!(
+                "Imported {} connections from {}, all read-only.",
+                count,
+                label
             )),
         }
         let dropped = self
@@ -203,14 +208,14 @@ impl Report {
             .map(|imported| format!("{} ({})", imported.name, imported.notes.join("; ")))
             .collect::<Vec<_>>();
         if !dropped.is_empty() {
-            parts.push(format!(
+            parts.push(trf!(
                 "{} had settings dropped: {}.",
                 dropped.len(),
                 dropped.join(", ")
             ));
         }
         if !self.skipped.is_empty() {
-            parts.push(format!(
+            parts.push(trf!(
                 "Skipped {}: {}.",
                 self.skipped.len(),
                 self.skipped

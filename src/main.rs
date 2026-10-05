@@ -9,6 +9,7 @@ mod explain;
 mod explorer;
 mod export;
 mod filter;
+mod i18n;
 mod import;
 // Nothing calls it until the MongoDB engine is wired in (phase 1b).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -74,6 +75,7 @@ use filter::{
     filter_bars, filter_row, foreign_key_filter, reference_filter, relation_sql, restored_filter,
     sort_columns, sort_expression, value_placeholder,
 };
+use i18n::{tr, trf};
 use icons::{Icons, icon};
 use palette::{Command, Mode as PaletteMode, Palette};
 use result_grid::{NewValue, ResultGrid};
@@ -119,7 +121,7 @@ fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, Stri
     // Destructured rather than unwrapped, so the compiler -- not a list of
     // names twenty lines up -- is what guarantees these are present.
     let (Some(host), Some(database), Some(user)) = (host, database, user) else {
-        return Err(format!(
+        return Err(trf!(
             "Connection configuration is missing {}.",
             missing.join(", ")
         ));
@@ -137,7 +139,7 @@ fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, Stri
     let port = port
         .map(|port| {
             port.parse()
-                .map_err(|_| "PGPORT is not a valid port.".to_string())
+                .map_err(|_| tr("PGPORT is not a valid port.").to_string())
         })
         .transpose()?;
 
@@ -258,8 +260,15 @@ fn main() {
             // here, rather than reused from `Workspace::new`'s own read of the
             // same file: nothing here can wait for a window and an entity to
             // exist first.
-            let overrides = store::peek_profiles()
-                .and_then(|(_, _, _, settings, _)| settings)
+            let settings = store::peek_profiles().and_then(|(_, _, _, settings, _)| settings);
+            // Before any label is built: `i18n::tr` reads the catalogue this
+            // picks, the menu bar below included.
+            i18n::init(
+                settings
+                    .as_ref()
+                    .and_then(|settings| settings.language.as_deref()),
+            );
+            let overrides = settings
                 .and_then(|settings| settings.custom_keybindings)
                 .unwrap_or_default();
             cx.bind_keys(keybindings::build_bindings(&overrides));
@@ -281,18 +290,18 @@ fn main() {
                     name: "dbdelve".into(),
                     disabled: false,
                     items: vec![
-                        MenuItem::action("Settings…", OpenSettings),
+                        MenuItem::action(tr("Settings…"), OpenSettings),
                         MenuItem::separator(),
-                        MenuItem::action("Quit dbdelve", Quit),
+                        MenuItem::action(tr("Quit dbdelve"), Quit),
                     ],
                 },
                 Menu {
-                    name: "File".into(),
+                    name: tr("File").into(),
                     disabled: false,
                     items: [
-                        MenuItem::action("New Query", NewQuery),
-                        MenuItem::action("New Connection", NewConnection),
-                        MenuItem::action("New Project", NewProject),
+                        MenuItem::action(tr("New Query"), NewQuery),
+                        MenuItem::action(tr("New Connection"), NewConnection),
+                        MenuItem::action(tr("New Project"), NewProject),
                     ]
                     .into_iter()
                     .chain({
@@ -301,7 +310,7 @@ fn main() {
                             .filter(|source| source.found())
                             .map(|source| {
                                 MenuItem::action(
-                                    format!("Import from {}…", source.label()),
+                                    trf!("Import from {}…", source.label()),
                                     ImportConnections { source },
                                 )
                             })
@@ -311,33 +320,33 @@ fn main() {
                     })
                     .chain([
                         MenuItem::separator(),
-                        MenuItem::action("Save Query", SaveQuery),
+                        MenuItem::action(tr("Save Query"), SaveQuery),
                         MenuItem::separator(),
-                        MenuItem::action("Close Tab", CloseTab),
+                        MenuItem::action(tr("Close Tab"), CloseTab),
                     ])
                     .collect(),
                 },
                 Menu {
-                    name: "Query".into(),
+                    name: tr("Query").into(),
                     disabled: false,
                     items: vec![
-                        MenuItem::action("Run", RunQuery),
-                        MenuItem::action("Cancel", CancelQuery),
+                        MenuItem::action(tr("Run"), RunQuery),
+                        MenuItem::action(tr("Cancel"), CancelQuery),
                     ],
                 },
                 Menu {
-                    name: "View".into(),
+                    name: tr("View").into(),
                     disabled: false,
                     items: vec![
-                        MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                        MenuItem::action("Toggle Row Panel", ToggleRowPanel),
+                        MenuItem::action(tr("Toggle Sidebar"), ToggleSidebar),
+                        MenuItem::action(tr("Toggle Row Panel"), ToggleRowPanel),
                         MenuItem::separator(),
-                        MenuItem::action("Zoom In", ZoomEditorIn),
-                        MenuItem::action("Zoom Out", ZoomEditorOut),
-                        MenuItem::action("Reset Zoom", ResetEditorZoom),
+                        MenuItem::action(tr("Zoom In"), ZoomEditorIn),
+                        MenuItem::action(tr("Zoom Out"), ZoomEditorOut),
+                        MenuItem::action(tr("Reset Zoom"), ResetEditorZoom),
                         MenuItem::separator(),
-                        MenuItem::action("Select Database…", SelectDatabase),
-                        MenuItem::action("Select Theme…", SelectTheme),
+                        MenuItem::action(tr("Select Database…"), SelectDatabase),
+                        MenuItem::action(tr("Select Theme…"), SelectTheme),
                     ],
                 },
             ]);

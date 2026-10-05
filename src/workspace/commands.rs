@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::i18n::{tr, trf};
 use crate::keybindings;
 
 impl Workspace {
@@ -196,7 +197,7 @@ impl Workspace {
         if let Some(owner) =
             keybindings::conflict(&chord, context, id, &self.settings.custom_keybindings)
         {
-            self.note(format!("\"{chord}\" is already bound to {owner}."), cx);
+            self.note(trf!("\"{}\" is already bound to {}.", chord, tr(owner)), cx);
             return;
         }
         self.settings
@@ -204,7 +205,7 @@ impl Workspace {
             .insert(id.to_string(), chord.clone());
         self.remember_profiles(cx);
         self.note(
-            format!("Bound to {chord}. Restart dbdelve for it to take effect."),
+            trf!("Bound to {}. Restart dbdelve for it to take effect.", chord),
             cx,
         );
         cx.notify();
@@ -217,7 +218,7 @@ impl Workspace {
         }
         self.remember_profiles(cx);
         self.note(
-            "Reset to default. Restart dbdelve for it to take effect.".into(),
+            tr("Reset to default. Restart dbdelve for it to take effect.").into(),
             cx,
         );
         cx.notify();

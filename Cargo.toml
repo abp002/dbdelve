@@ -205,6 +205,11 @@ percent-encoding = "=2.3.2"
 # few lines. This is Helix's matcher, and it pulls in memchr and nothing else.
 nucleo-matcher = "=0.3.1"
 
+# The interface language when Settings names none: the system's locale tag,
+# read through each platform's own API (CFLocale, GetUserDefaultLocaleName,
+# LANG). No dependencies of its own on macOS or Windows.
+sys-locale = "=0.3.2"
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"

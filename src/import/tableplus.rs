@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Imported, Report, Skipped, mongo, mongo_url, port, root_certificate};
+use crate::i18n::{tr, trf};
 use crate::{
     db::{ConnectionConfig, ServerConfig, SshTunnel, SslMode},
     store,
@@ -60,7 +61,7 @@ pub(super) fn read() -> Result<Report, String> {
 // value into JSON, so a file holding one fails whole; the `plist` crate reads
 // both, and is the upgrade if that bites.
 fn plist_rows(file: &Path) -> Result<Vec<Value>, String> {
-    let unreadable = |why: &str| format!("TablePlus's {} could not be read: {why}", file.display());
+    let unreadable = |why: &str| trf!("TablePlus's {} could not be read: {}", file.display(), why);
     let output = Command::new("/usr/bin/plutil")
         .args(["-convert", "json", "-o", "-"])
         .arg(file)
@@ -71,7 +72,7 @@ fn plist_rows(file: &Path) -> Result<Vec<Value>, String> {
     }
     match serde_json::from_slice(&output.stdout) {
         Ok(Value::Array(rows)) => Ok(rows),
-        Ok(_) => Err(unreadable("it isn't a list of connections")),
+        Ok(_) => Err(unreadable(tr("it isn't a list of connections"))),
         Err(error) => Err(unreadable(&error.to_string())),
     }
 }
@@ -90,21 +91,22 @@ fn keychain_secret(account: &str) -> Result<Option<Vec<u8>>, String> {
 /// Returns the path the tunnel names, or the note saying why there is none.
 fn write_key(id: &str, key: &[u8]) -> Result<String, String> {
     if let Some(reason) = store::unsafe_component(id) {
-        return Err(format!("SSH key left off: its connection ID {reason}"));
+        return Err(trf!("SSH key left off: its connection ID {}", reason));
     }
     let path = store::ssh_key_directory()
-        .map_err(|error| format!("SSH key left off: {error}"))?
+        .map_err(|error| trf!("SSH key left off: {}", error))?
         .join(format!("tableplus-{id}"));
     let unwritten = |why: &dyn std::fmt::Display| {
-        format!(
-            "SSH key left off: it couldn't be written to {}: {why}",
-            path.display()
+        trf!(
+            "SSH key left off: it couldn't be written to {}: {}",
+            path.display(),
+            why
         )
     };
     store::write_private_key(&path, key).map_err(|error| unwritten(&error.kind()))?;
     path.to_str()
         .map(str::to_string)
-        .ok_or_else(|| unwritten(&"the path isn't valid UTF-8"))
+        .ok_or_else(|| unwritten(&tr("the path isn't valid UTF-8")))
 }
 
 /// TablePlus's encoding of the item is unverified, so both PEM text and
@@ -204,9 +206,9 @@ fn read_rows(
                     name: value
                         .get("ConnectionName")
                         .and_then(Value::as_str)
-                        .unwrap_or("A TablePlus connection")
+                        .unwrap_or(tr("A TablePlus connection"))
                         .to_string(),
-                    reason: format!("could not be read: {error}"),
+                    reason: trf!("could not be read: {}", error),
                 });
                 continue;
             }
@@ -262,9 +264,9 @@ fn read_rows(
                     Ok(None) => {}
                     Ok(Some(stored)) => {
                         let written = private_key(stored)
-                            .ok_or_else(|| UNREADABLE_KEY.to_string())
+                            .ok_or_else(|| tr(UNREADABLE_KEY).to_string())
                             .and_then(|key| write_key(&row.id, &key));
-                        imported.notes.retain(|note| note != UNLOCATED_KEY);
+                        imported.notes.retain(|note| note != tr(UNLOCATED_KEY));
                         match written {
                             Ok(path) => tunnel.identity_file = Some(path),
                             Err(note) => imported.notes.push(note),
@@ -274,14 +276,14 @@ fn read_rows(
                 }
             }
             if keychain_refused && !was_refused {
-                report.notes.push(UNREADABLE_PASSWORDS.to_string());
+                report.notes.push(tr(UNREADABLE_PASSWORDS).to_string());
             }
         }
         if let Some(url) = stored_url {
             match from_connection_string(&url, &row.user, &imported.config) {
                 Ok(config) => imported.config = config,
                 Err(_) => imported.notes.push(
-                    "the saved connection string couldn't be read, so its login was left off"
+                    tr("the saved connection string couldn't be read, so its login was left off")
                         .into(),
                 ),
             }
@@ -356,14 +358,14 @@ fn target(driver: &str) -> Result<Target, String> {
         "mariadb" => Ok(Target::Server(ConnectionConfig::MariaDb, MARIADB_TLS)),
         "mongo" | "mongodb" => Ok(Target::Server(mongo, MONGO_TLS)),
         "sqlite" => Ok(Target::File),
-        "snowflake" => Err("DBDelve's Snowflake signs in with a key file only".into()),
+        "snowflake" => Err(tr("DBDelve's Snowflake signs in with a key file only").into()),
         // Only the first entry of its dropdown is known, so any other comes in
         // as verify-full rather than as something it may be stronger than.
         _ if lowered.contains("sqlserver") || lowered.contains("sql server") => Ok(Target::Server(
             ConnectionConfig::SqlServer,
             &[SslMode::Prefer],
         )),
-        _ => Err(format!("{driver} isn't supported")),
+        _ => Err(trf!("{} isn't supported", driver)),
     }
 }
 
@@ -374,18 +376,18 @@ fn import(name: String, row: &Row) -> Result<Imported, String> {
             path: [&row.path, &row.host]
                 .into_iter()
                 .find(|path| !path.is_empty())
-                .ok_or("it has no database file")?
+                .ok_or(tr("it has no database file"))?
                 .clone(),
             statement_timeout: 0,
         },
         Target::Server(engine, tls) => {
             if row.host.is_empty() {
-                return Err("it has no host".into());
+                return Err(tr("it has no host").into());
             }
             let (sslmode, ca) = ssl(row, tls, &mut notes);
             let mut config = engine(ServerConfig {
                 host: row.host.clone(),
-                port: port("port", filled(&row.port), &mut notes),
+                port: port(tr("port"), filled(&row.port), &mut notes),
                 database: row.database.clone(),
                 user: row.user.clone(),
                 sslmode,
@@ -401,7 +403,7 @@ fn import(name: String, row: &Row) -> Result<Imported, String> {
                     config = from_connection_string(&row.host, &row.user, &config)?;
                 }
                 if !row.other_options.is_empty() {
-                    notes.push("other options left off: their format isn't known".into());
+                    notes.push(tr("other options left off: their format isn't known").into());
                 }
             }
             config
@@ -427,7 +429,7 @@ fn ssl(row: &Row, tls: &[SslMode], notes: &mut Vec<String>) -> (SslMode, Option<
         .ok()
         .and_then(|index| tls.get(index).copied())
         .unwrap_or_else(|| {
-            notes.push(format!(
+            notes.push(trf!(
                 "SSL mode {} isn't one DBDelve has, so it was set to verify-full",
                 row.tls_mode
             ));
@@ -442,7 +444,7 @@ fn ssl(row: &Row, tls: &[SslMode], notes: &mut Vec<String>) -> (SslMode, Option<
     if (0..row.tls_key_paths.len().max(authority))
         .any(|index| index != authority && key_path(index).is_some())
     {
-        notes.push("client certificate left off: DBDelve doesn't send one".into());
+        notes.push(tr("client certificate left off: DBDelve doesn't send one").into());
     }
     (sslmode, key_path(authority))
 }
@@ -452,7 +454,7 @@ fn ssh(row: &Row, notes: &mut Vec<String>) -> Option<SshTunnel> {
         return None;
     }
     let left_off = |notes: &mut Vec<String>, reason: &str| {
-        notes.push(format!("SSH tunnel left off: {reason}"));
+        notes.push(trf!("SSH tunnel left off: {}", reason));
         None
     };
     // TablePlus may name only a key it imported into its own store, looked
@@ -460,20 +462,20 @@ fn ssh(row: &Row, notes: &mut Vec<String>) -> Option<SshTunnel> {
     let identity_file = if row.ssh_uses_key {
         let located = SshTunnel::identity_file_error(&row.ssh_key).is_none();
         if !located {
-            notes.push(UNLOCATED_KEY.into());
+            notes.push(tr(UNLOCATED_KEY).into());
         }
         located.then(|| row.ssh_key.clone())
     } else if row.ssh_password_mode == 2 {
         None
     } else {
-        return left_off(notes, "it logs in with a password");
+        return left_off(notes, tr("it logs in with a password"));
     };
     if row.ssh_host.is_empty() {
-        return left_off(notes, "it has no host");
+        return left_off(notes, tr("it has no host"));
     }
     Some(SshTunnel {
         host: row.ssh_host.clone(),
-        port: port("SSH port", filled(&row.ssh_port), notes),
+        port: port(tr("SSH port"), filled(&row.ssh_port), notes),
         user: row.ssh_user.clone(),
         identity_file,
     })

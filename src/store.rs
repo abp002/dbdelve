@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Cell, EditTarget, RelationKind, SshTunnel};
+use crate::i18n::{tr, trf};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -317,6 +318,9 @@ pub struct StoredSettings {
     pub check_for_updates: Option<bool>,
     #[serde(default)]
     pub color_titlebar: Option<bool>,
+    /// An `i18n::LANGUAGES` code; none follows the system.
+    #[serde(default)]
+    pub language: Option<String>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -399,18 +403,22 @@ pub fn load_profiles() -> Result<Restored, LoadFailure> {
     let kept = path.with_file_name(format!("{PROFILES_FILE}.broken"));
     Err(match fs::rename(&path, &kept) {
         Ok(()) => LoadFailure {
-            message: format!(
-                "Could not read {}{what}, and it has been kept as {}: {error}",
+            message: trf!(
+                "Could not read {}{}, and it has been kept as {}: {}",
                 path.display(),
-                kept.display()
+                what,
+                kept.display(),
+                error
             ),
             moved_aside: true,
         },
         Err(rename_error) => LoadFailure {
-            message: format!(
-                "Could not read {}{what}, and it could not be moved aside ({rename_error}), \
-                 so nothing will be saved until dbdelve is restarted: {error}",
-                path.display()
+            message: trf!(
+                "Could not read {}{}, and it could not be moved aside ({}), so nothing will be saved until dbdelve is restarted: {}",
+                path.display(),
+                what,
+                rename_error,
+                error
             ),
             moved_aside: false,
         },
@@ -427,7 +435,7 @@ pub fn peek_profiles() -> Option<Restored> {
 /// -- and why.
 fn read_profiles(path: &Path) -> Result<Restored, (&'static str, String)> {
     match fs::read_to_string(path) {
-        Ok(text) => decode_profiles(&text).map_err(|error| (" as TOML", error)),
+        Ok(text) => decode_profiles(&text).map_err(|error| (tr(" as TOML"), error)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             Ok((Vec::new(), None, None, None, Vec::new()))
         }
@@ -463,7 +471,7 @@ pub fn save_profiles(
         projects: projects.to_vec(),
         profiles: profiles.to_vec(),
     })
-    .map_err(|error| format!("Could not encode the profile list: {error}"))?;
+    .map_err(|error| trf!("Could not encode the profile list: {}", error))?;
     write_file(&dbdelve_directory()?.join(PROFILES_FILE), &text)
 }
 
@@ -506,10 +514,11 @@ pub fn password(profile_id: &str) -> Result<Option<String>, String> {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::BadEncoding(_)) => {
-            Err("The keychain password is not valid text.".to_string())
+            Err(tr("The keychain password is not valid text.").to_string())
         }
-        Err(error) => Err(format!(
-            "Could not read the password from the keychain: {error}"
+        Err(error) => Err(trf!(
+            "Could not read the password from the keychain: {}",
+            error
         )),
     }
 }
@@ -517,7 +526,7 @@ pub fn password(profile_id: &str) -> Result<Option<String>, String> {
 pub fn set_password(profile_id: &str, password: &str) -> Result<(), String> {
     keychain_entry(profile_id)?
         .set_password(password)
-        .map_err(|error| format!("Could not save the password to the keychain: {error}"))
+        .map_err(|error| trf!("Could not save the password to the keychain: {}", error))
 }
 
 pub fn delete_password(profile_id: &str) {
@@ -531,7 +540,7 @@ pub fn delete_password(profile_id: &str) {
 /// which is what keeps a dev build's passwords apart from a release build's.
 fn keychain_entry(profile_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(&variant_name()?, profile_id)
-        .map_err(|error| format!("Could not reach the keychain: {error}"))
+        .map_err(|error| trf!("Could not reach the keychain: {}", error))
 }
 
 pub fn saved_queries(profile_id: &str) -> Vec<String> {
@@ -575,18 +584,18 @@ pub fn delete_queries(profile_id: &str) -> Result<(), String> {
     match fs::remove_dir_all(&directory) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not delete {}: {error}", directory.display())),
+        Err(error) => Err(trf!("Could not delete {}: {}", directory.display(), error)),
     }
 }
 
 pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
     let path = query_path(profile_id, name)?;
-    fs::remove_file(&path).map_err(|error| format!("Could not delete {}: {error}", path.display()))
+    fs::remove_file(&path).map_err(|error| trf!("Could not delete {}: {}", path.display(), error))
 }
 
 pub fn validate_query_name(name: &str) -> Result<(), String> {
     match unsafe_component(name) {
-        Some(reason) => Err(format!("Query name {reason}.")),
+        Some(reason) => Err(trf!("Query name {}.", reason)),
         None => Ok(()),
     }
 }
@@ -618,7 +627,7 @@ pub fn delete_scratch(profile_id: &str, tab: u64) -> Result<(), String> {
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not delete {}: {error}", path.display())),
+        Err(error) => Err(trf!("Could not delete {}: {}", path.display(), error)),
     }
 }
 
@@ -632,18 +641,18 @@ pub fn delete_scratch(profile_id: &str, tab: u64) -> Result<(), String> {
 pub fn append_history(profile_id: &str, sql: &str) -> Result<(), String> {
     let directory = query_directory(profile_id)?;
     fs::create_dir_all(&directory)
-        .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
+        .map_err(|error| trf!("Could not create {}: {}", directory.display(), error))?;
     let path = directory.join(HISTORY_FILE);
     let line = serde_json::to_string(sql)
-        .map_err(|error| format!("Could not encode the statement: {error}"))?;
+        .map_err(|error| trf!("Could not encode the statement: {}", error))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+        .map_err(|error| trf!("Could not open {}: {}", path.display(), error))?;
     secure(&path)?;
     writeln!(file, "{line}")
-        .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+        .map_err(|error| trf!("Could not write {}: {}", path.display(), error))?;
     compact_history(&path);
     Ok(())
 }
@@ -753,7 +762,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
         grid
     };
     let text = serde_json::to_string(grid)
-        .map_err(|error| format!("Could not encode the grid: {error}"))?;
+        .map_err(|error| trf!("Could not encode the grid: {}", error))?;
     write_file(&path, &text)
 }
 
@@ -768,7 +777,7 @@ pub fn delete_grids(profile_id: &str) -> Result<(), String> {
     match fs::remove_dir_all(&directory) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not delete {}: {error}", directory.display())),
+        Err(error) => Err(trf!("Could not delete {}: {}", directory.display(), error)),
     }
 }
 
@@ -809,7 +818,7 @@ pub fn remove_grid(profile_id: &str, key: &str) -> Result<(), String> {
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not delete {}: {error}", path.display())),
+        Err(error) => Err(trf!("Could not delete {}: {}", path.display(), error)),
     }
 }
 
@@ -862,13 +871,13 @@ fn escape_grid_key(value: &str) -> String {
 
 pub(crate) fn unsafe_component(value: &str) -> Option<&'static str> {
     if value.trim().is_empty() {
-        Some("is empty")
+        Some(tr("is empty"))
     } else if value.contains(['/', '\\']) {
-        Some("contains a path separator")
+        Some(tr("contains a path separator"))
     } else if value.contains('\0') {
-        Some("contains a NUL character")
+        Some(tr("contains a NUL character"))
     } else if value.starts_with('.') {
-        Some("starts with a dot")
+        Some(tr("starts with a dot"))
     } else {
         None
     }
@@ -932,12 +941,12 @@ pub(crate) fn home() -> Result<PathBuf, String> {
     value
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| format!("{key} is not set."))
+        .ok_or_else(|| trf!("{} is not set.", key))
 }
 
 fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
     if let Some(reason) = unsafe_component(profile_id) {
-        return Err(format!("Profile id {reason}."));
+        return Err(trf!("Profile id {}.", reason));
     }
     Ok(dbdelve_directory()?.join("queries").join(profile_id))
 }
@@ -953,14 +962,14 @@ fn query_path(profile_id: &str, name: &str) -> Result<PathBuf, String> {
 
 fn grids_directory(profile_id: &str) -> Result<PathBuf, String> {
     if let Some(reason) = unsafe_component(profile_id) {
-        return Err(format!("Profile id {reason}."));
+        return Err(trf!("Profile id {}.", reason));
     }
     Ok(dbdelve_directory()?.join("grids").join(profile_id))
 }
 
 fn grid_path(profile_id: &str, key: &str) -> Result<PathBuf, String> {
     if let Some(reason) = unsafe_component(key) {
-        return Err(format!("Grid key {reason}."));
+        return Err(trf!("Grid key {}.", reason));
     }
     Ok(grids_directory(profile_id)?.join(format!("{key}.json")))
 }
@@ -972,24 +981,24 @@ fn read_file(path: &Path) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("Could not read {}: {error}", path.display())),
+        Err(error) => Err(trf!("Could not read {}: {}", path.display(), error)),
     }
 }
 
 fn write_file(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+            .map_err(|error| trf!("Could not create {}: {}", parent.display(), error))?;
     }
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, contents)
-        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))?;
+        .map_err(|error| trf!("Could not write {}: {}", temporary.display(), error))?;
     // Set before the rename, not after: the rename is what makes this the file
     // at `path`, so a mode applied afterward would leave it world-readable for
     // however long the two steps are apart.
     let written = secure(&temporary).and_then(|()| {
         fs::rename(&temporary, path)
-            .map_err(|error| format!("Could not replace {}: {error}", path.display()))
+            .map_err(|error| trf!("Could not replace {}: {}", path.display(), error))
     });
     if written.is_err() {
         // Nothing reads a leftover temporary, and every failed write would
@@ -1054,7 +1063,7 @@ fn secure(path: &Path) -> Result<(), String> {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Could not set permissions on {}: {error}", path.display()))
+            .map_err(|error| trf!("Could not set permissions on {}: {}", path.display(), error))
     }
     #[cfg(windows)]
     {
@@ -1791,6 +1800,7 @@ open_objects = []
                 opacity: Some(0.8),
                 check_for_updates: Some(false),
                 color_titlebar: Some(false),
+                language: Some("es".into()),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),

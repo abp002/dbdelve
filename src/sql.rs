@@ -31,6 +31,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::Engine;
+use crate::i18n::{tr, trf};
 use crate::result_grid::{NewValue, PendingRow};
 
 /// The runnable statements of a query buffer, as byte ranges into it.
@@ -458,7 +459,7 @@ pub fn insert_row(
         | Engine::SqlServer => {}
     }
     if columns.is_empty() {
-        return Err("There is nothing in this row to insert.".into());
+        return Err(tr("There is nothing in this row to insert.").into());
     }
 
     let names: Vec<String> = columns
@@ -1367,8 +1368,7 @@ pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
         .filter(|batch| !tsql_statements(sql, batch.clone()).is_empty())
         .filter_map(|batch| trim_range(sql, batch));
     match (batches.next(), batches.next()) {
-        (_, Some(_)) => Err("The selection holds more than one batch separated by GO, \
-             and dbdelve sends one batch at a time."
+        (_, Some(_)) => Err(tr("The selection holds more than one batch separated by GO, and dbdelve sends one batch at a time.")
             .into()),
         (batch, None) => Ok(batch.map_or("", |batch| &sql[batch])),
     }
@@ -1405,8 +1405,9 @@ pub(crate) fn batch_repeats(engine: Engine, sql: &str, offset: usize) -> Result<
 fn repeats(count: u64) -> Result<(), String> {
     match count {
         1 => Ok(()),
-        _ => Err(format!(
-            "GO {count} repeats its batch, and dbdelve runs a batch once."
+        _ => Err(trf!(
+            "GO {} repeats its batch, and dbdelve runs a batch once.",
+            count
         )),
     }
 }
@@ -1436,7 +1437,7 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
         | Engine::SqlServer => {}
     }
     if rows.is_empty() {
-        return Err("There are no edits to apply.".into());
+        return Err(tr("There are no edits to apply.").into());
     }
 
     fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -1470,7 +1471,7 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
         .collect();
 
     let batch = statements
-        .ok_or("dbdelve cannot name an edited row by its primary key.")?
+        .ok_or(tr("dbdelve cannot name an edited row by its primary key."))?
         .join("\n");
     let bracket = engine.transaction_start().filter(|_| rows.len() > 1);
     Ok(match bracket {
@@ -1529,9 +1530,9 @@ impl Mode {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Mode::ReadOnly => "Read-only",
-            Mode::ReadWrite => "Read-write",
-            Mode::Full => "Full",
+            Mode::ReadOnly => tr("Read-only"),
+            Mode::ReadWrite => tr("Read-write"),
+            Mode::Full => tr("Full"),
         }
     }
 
@@ -2164,7 +2165,9 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> 
         }
     };
     if has_dollar_quote(sql) {
-        return Err("Not formatting: a dollar-quoted body would be rewritten.");
+        return Err(tr(
+            "Not formatting: a dollar-quoted body would be rewritten.",
+        ));
     }
     let options = sqlformat::FormatOptions {
         dialect,

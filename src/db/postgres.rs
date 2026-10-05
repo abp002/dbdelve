@@ -15,6 +15,7 @@ use super::{
     assemble_references, assemble_sizes, assemble_structure, create_table, non_utf8_error,
     optional_cell, plain_error, required_cell, terminated,
 };
+use crate::i18n::{tr, trf};
 
 /// The port the server listens on when the profile does not say.
 pub(super) const DEFAULT_PORT: u16 = 5432;
@@ -369,7 +370,7 @@ const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
 pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     let url_parts =
-        url::Url::parse(url).map_err(|error| format!("Connection URL is invalid: {error}"))?;
+        url::Url::parse(url).map_err(|error| trf!("Connection URL is invalid: {}", error))?;
     let has_explicit_port = url_parts.port().is_some()
         || url_parts
             .query_pairs()
@@ -403,26 +404,26 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     let parsed: postgres::Config = without_tls_keys
         .as_str()
         .parse()
-        .map_err(|error| format!("Connection URL is invalid: {error}"))?;
+        .map_err(|error| trf!("Connection URL is invalid: {}", error))?;
     let host = match parsed.get_hosts() {
         [Host::Tcp(host)] => host.clone(),
-        [] => return Err("Connection URL does not contain a host.".into()),
+        [] => return Err(tr("Connection URL does not contain a host.").into()),
         #[cfg(unix)]
-        [Host::Unix(_)] => return Err("Connection URL contains a Unix socket host.".into()),
-        _ => return Err("Connection URL contains more than one host.".into()),
+        [Host::Unix(_)] => return Err(tr("Connection URL contains a Unix socket host.").into()),
+        _ => return Err(tr("Connection URL contains more than one host.").into()),
     };
     let database = parsed.get_dbname().unwrap_or_default().to_string();
     let user = parsed
         .get_user()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Connection URL does not contain a username.".to_string())?
+        .ok_or_else(|| tr("Connection URL does not contain a username.").to_string())?
         .to_string();
     let password = parsed
         .get_password()
         .map(|password| {
             std::str::from_utf8(password)
                 .map(str::to_string)
-                .map_err(|_| "Connection URL password is not valid UTF-8.".to_string())
+                .map_err(|_| tr("Connection URL password is not valid UTF-8.").to_string())
         })
         .transpose()?
         .unwrap_or_default();
@@ -591,7 +592,7 @@ impl Connection {
             Some(connector) => self.cancel.cancel_query(connector.clone()),
         }
         .map_err(|error| DbError {
-            message: format!("Could not ask the server to cancel: {error}"),
+            message: trf!("Could not ask the server to cancel: {}", error),
             position: None,
         })
     }
@@ -613,7 +614,7 @@ impl Connection {
 
     fn run(&self, sql: &str, typed: bool) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().map_err(|_| DbError {
-            message: "The connection is unavailable after an earlier internal failure.".into(),
+            message: tr("The connection is unavailable after an earlier internal failure.").into(),
             position: None,
         })?;
 
@@ -769,7 +770,11 @@ impl Connection {
         let structure = self.structure(schema, relation)?;
         let storage = self.internal_query(&structure_sql(TABLE_STORAGE_SQL, schema, relation))?;
         if storage.rows.is_empty() {
-            return Err(plain_error(format!("{schema} has no relation {relation}.")));
+            return Err(plain_error(trf!(
+                "{} has no relation {}.",
+                schema,
+                relation
+            )));
         }
         let first = storage.rows.first().map(Vec::as_slice).unwrap_or_default();
         let (head, tail) = match (
@@ -1110,7 +1115,7 @@ fn connect_error(error: &postgres::Error, server: &ServerConfig) -> DbError {
         && io.kind() == std::io::ErrorKind::ConnectionRefused
     {
         return DbError {
-            message: format!(
+            message: trf!(
                 "Connection refused: nothing is listening on {}",
                 server.endpoint()
             ),

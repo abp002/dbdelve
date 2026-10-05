@@ -29,6 +29,7 @@ use super::{
     Reference, Structure, assemble_catalog, assemble_references, assemble_structure,
     non_utf8_error, percent_decoded, plain_error, required_cell,
 };
+use crate::i18n::{tr, trf};
 
 /// The path out of a `sqlite:` or `file:` URL.
 ///
@@ -42,7 +43,7 @@ pub fn path_from_url(url: &str) -> Result<String, String> {
     let rest = url
         .split_once(':')
         .map(|(_, rest)| rest)
-        .ok_or_else(|| "Connection URL does not name a database file.".to_string())?;
+        .ok_or_else(|| tr("Connection URL does not name a database file.").to_string())?;
     let path = rest.strip_prefix("//").unwrap_or(rest);
     let mut decoded = percent_decoded(path)?;
     // `sqlite:///C:/a.db` is the standard spelling of a Windows path, and the
@@ -55,7 +56,7 @@ pub fn path_from_url(url: &str) -> Result<String, String> {
     }
 
     if decoded.is_empty() {
-        return Err("Connection URL does not name a database file.".into());
+        return Err(tr("Connection URL does not name a database file.").into());
     }
     Ok(decoded)
 }
@@ -91,14 +92,14 @@ impl Connection {
         // URL already, and leaving URI parsing on would make a path containing
         // `?` mean something other than itself.
         if !Path::new(path).exists() {
-            return Err(plain_error(format!("No database file at {path}")));
+            return Err(plain_error(trf!("No database file at {}", path)));
         }
 
         let connection = rusqlite::Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(|error| plain_error(format!("Cannot open {path}: {}", describe(&error))))?;
+        .map_err(|error| plain_error(trf!("Cannot open {}: {}", path, describe(&error))))?;
 
         Ok(Self::wrap(connection, statement_timeout))
     }
@@ -165,7 +166,7 @@ impl Connection {
         // too. Dropped at the end of this call, whichever way it leaves.
         let _deadline = self.deadline();
         let connection = self.connection.lock().map_err(|_| DbError {
-            message: "The connection is unavailable after an earlier internal failure.".into(),
+            message: tr("The connection is unavailable after an earlier internal failure.").into(),
             position: None,
         })?;
 
@@ -428,7 +429,11 @@ impl Connection {
         ))?;
         let statements = column_of(&listed, "sql")?;
         if statements.is_empty() {
-            return Err(plain_error(format!("{schema} has no relation {relation}.")));
+            return Err(plain_error(trf!(
+                "{} has no relation {}.",
+                schema,
+                relation
+            )));
         }
         Ok(statements.join(";\n") + ";")
     }
@@ -861,9 +866,9 @@ fn rolled_back(
     }
 
     let outcome = match connection.execute_batch("ROLLBACK") {
-        Ok(()) => "The transaction the batch opened was rolled back; nothing it wrote remains."
+        Ok(()) => tr("The transaction the batch opened was rolled back; nothing it wrote remains.")
             .to_string(),
-        Err(failure) => format!(
+        Err(failure) => trf!(
             "The transaction the batch opened is still open: the rollback failed too. {}",
             describe(&failure)
         ),

@@ -12,6 +12,7 @@ use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use serde_json::Value;
 
 use super::{Imported, Report, Skipped, mongo, mongo_url, port, root_certificate};
+use crate::i18n::{tr, trf};
 use crate::{
     db::{ConnectionConfig, Engine, ServerConfig, SshTunnel, SslMode},
     store,
@@ -85,7 +86,7 @@ fn read_workspace(root: &Path, report: &mut Report) -> Result<(), String> {
 
 fn entries(directory: &Path) -> Result<Vec<PathBuf>, String> {
     let mut paths = fs::read_dir(directory)
-        .map_err(|error| format!("{} could not be read: {error}", directory.display()))?
+        .map_err(|error| trf!("{} could not be read: {}", directory.display(), error))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect::<Vec<_>>();
     paths.sort();
@@ -106,9 +107,9 @@ fn read_project_file(data_sources: &Path, credentials: &Path, report: &mut Repor
                 if !report
                     .notes
                     .iter()
-                    .any(|note| note == UNREADABLE_CREDENTIALS)
+                    .any(|note| note == tr(UNREADABLE_CREDENTIALS))
                 {
-                    report.notes.push(UNREADABLE_CREDENTIALS.to_string());
+                    report.notes.push(tr(UNREADABLE_CREDENTIALS).to_string());
                 }
                 Value::Null
             }
@@ -123,7 +124,7 @@ fn read_project_file(data_sources: &Path, credentials: &Path, report: &mut Repor
         Ok(document) => read_connections(&document, &credentials, report),
         Err(error) => report.skipped.push(Skipped {
             name: data_sources.display().to_string(),
-            reason: format!("could not be read: {error}"),
+            reason: trf!("could not be read: {}", error),
         }),
     }
 }
@@ -131,14 +132,14 @@ fn read_project_file(data_sources: &Path, credentials: &Path, report: &mut Repor
 /// The first block is the IV, the rest AES-128-CBC with PKCS#5 padding.
 fn decrypt(bytes: &[u8]) -> Result<Value, String> {
     if bytes.len() < 16 {
-        return Err("too short to hold an IV".into());
+        return Err(tr("too short to hold an IV").into());
     }
     let (iv, ciphertext) = bytes.split_at(16);
     let mut buffer = ciphertext.to_vec();
     let plaintext = cbc::Decryptor::<aes::Aes128>::new_from_slices(&KEY, iv)
         .map_err(|error| error.to_string())?
         .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-        .map_err(|_| "does not decrypt".to_string())?;
+        .map_err(|_| tr("does not decrypt").to_string())?;
     serde_json::from_slice(plaintext).map_err(|error| error.to_string())
 }
 
@@ -176,16 +177,16 @@ fn target(provider: &str, driver: &str) -> Result<Target, String> {
         // id its documentation gives; it is unverified against a real file.
         "mongodb" => Ok(Target::Server(mongo)),
         "sqlite" if driver == "sqlite_jdbc" => Ok(Target::File),
-        "sqlite" => Err(format!("the {driver} driver isn't supported")),
+        "sqlite" => Err(trf!("the {} driver isn't supported", driver)),
         // DBeaver's own spelling of one of them.
         "mssql" if driver.starts_with("sybase") || driver.starts_with("sypase") => {
-            Err("Sybase isn't supported".into())
+            Err(tr("Sybase isn't supported").into())
         }
         "sqlserver" | "mssql" => Ok(Target::Server(ConnectionConfig::SqlServer)),
-        "snowflake" => Err("DBDelve's Snowflake signs in with a key file only".into()),
-        "oracle" => Err("Oracle isn't supported".into()),
-        "generic" => Err(format!("{driver} isn't supported")),
-        other => Err(format!("{other} isn't supported")),
+        "snowflake" => Err(tr("DBDelve's Snowflake signs in with a key file only").into()),
+        "oracle" => Err(tr("Oracle isn't supported").into()),
+        "generic" => Err(trf!("{} isn't supported", driver)),
+        other => Err(trf!("{} isn't supported", other)),
     }
 }
 
@@ -218,7 +219,7 @@ fn import(
                         .and_then(|url| url.strip_prefix("jdbc:sqlite:"))
                         .map(str::to_string)
                 })
-                .ok_or("it has no database file")?,
+                .ok_or(tr("it has no database file"))?,
             statement_timeout: 0,
         },
         Target::Server(engine) => {
@@ -233,8 +234,8 @@ fn import(
                 from_jdbc(url.as_deref().unwrap_or_default(), &user, &password, engine)?
             } else {
                 engine(ServerConfig {
-                    host: field("host").ok_or("it has no host")?,
-                    port: port("port", field("port"), &mut notes),
+                    host: field("host").ok_or(tr("it has no host"))?,
+                    port: port(tr("port"), field("port"), &mut notes),
                     database: field("database").unwrap_or_default(),
                     user,
                     password,
@@ -250,7 +251,7 @@ fn import(
             {
                 // Which of them are MongoDB's options, and how DBeaver
                 // spells them, is unverified, so none are carried over.
-                notes.push("driver properties left off".into());
+                notes.push(tr("driver properties left off").into());
             }
             if let Some(server) = config.server_mut() {
                 let ssh_login =
@@ -300,7 +301,7 @@ fn from_jdbc(
         .and_then(|url| url.split_once("://"))
     {
         Some(("postgresql" | "mysql" | "mariadb", _)) => url["jdbc:".len()..].to_string(),
-        _ => return Err(UNREADABLE.into()),
+        _ => return Err(tr(UNREADABLE).into()),
     };
     let mut url = url::Url::parse(&url).map_err(|error| error.to_string())?;
     // Set on the config rather than in the URL: `set_password` leaves a `%`
@@ -342,7 +343,7 @@ fn ssh(handler: &Value, login: Option<&Value>, notes: &mut Vec<String>) -> Optio
     let properties = &handler["properties"];
     let property = |key: &str| text(properties.get(key));
     let mut left_off = |reason: &str| {
-        notes.push(format!("SSH tunnel left off: {reason}"));
+        notes.push(trf!("SSH tunnel left off: {}", reason));
         None
     };
     let jumps = property("jumpServer.count")
@@ -350,28 +351,26 @@ fn ssh(handler: &Value, login: Option<&Value>, notes: &mut Vec<String>) -> Optio
         .is_some_and(|count| count > 0)
         || property("jumpServerEnabled").as_deref() == Some("true");
     if jumps {
-        return left_off("it goes through a jump server");
+        return left_off(tr("it goes through a jump server"));
     }
     let identity_file = match property("authType").as_deref() {
         Some("PUBLIC_KEY") => property("keyPath"),
         Some("AGENT") => None,
-        _ => return left_off("it logs in with a password"),
+        _ => return left_off(tr("it logs in with a password")),
     };
     let Some(host) = property("host") else {
-        return left_off("it has no host");
+        return left_off(tr("it has no host"));
     };
     let identity_file = identity_file.filter(|path| {
         let relative = SshTunnel::identity_file_error(path).is_some();
         if relative {
-            notes.push(format!(
-                "SSH key {path} left off: it isn't an absolute path"
-            ));
+            notes.push(trf!("SSH key {} left off: it isn't an absolute path", path));
         }
         !relative
     });
     Some(SshTunnel {
         host,
-        port: port("SSH port", property("port"), notes),
+        port: port(tr("SSH port"), property("port"), notes),
         user: text(login.and_then(|login| login.get("user")))
             .or_else(|| text(handler.get("user")))
             .unwrap_or_default(),
@@ -406,7 +405,7 @@ fn ssl(
     };
 
     if tab("ssl.client.cert").is_some() || tab("ssl.client.key").is_some() {
-        notes.push("client certificate left off: DBDelve doesn't send one".into());
+        notes.push(tr("client certificate left off: DBDelve doesn't send one").into());
     }
     let read: &[&str] = if microsoft {
         &[
@@ -428,7 +427,7 @@ fn ssl(
             .any(|word| lowered.contains(word))
             && !read.contains(&lowered.as_str())
         {
-            notes.push(format!("driver property {name} left off"));
+            notes.push(trf!("driver property {} left off", name));
         }
     }
 
@@ -437,8 +436,9 @@ fn ssl(
     };
     let sslmode = if let Some(mode) = tab("sslMode").or_else(|| driver("sslmode")) {
         named_mode(&mode).unwrap_or_else(|| {
-            notes.push(format!(
-                "SSL mode {mode} isn't one DBDelve has, so it was set to verify-full"
+            notes.push(trf!(
+                "SSL mode {} isn't one DBDelve has, so it was set to verify-full",
+                mode
             ));
             SslMode::VerifyFull
         })
