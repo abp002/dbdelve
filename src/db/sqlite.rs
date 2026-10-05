@@ -80,6 +80,23 @@ pub struct Connection {
     statement_timeout: Option<Duration>,
 }
 
+/// `~/x` as the file under the home directory, the way a shell would read it.
+/// A path is typed into the form as often as it is picked, and `~` is how
+/// people type their home; left alone it names a directory called `~`.
+fn home_expanded(path: &str) -> String {
+    let rest = match path {
+        "~" => "",
+        _ => match path.strip_prefix("~/") {
+            Some(rest) => rest,
+            None => return path.to_string(),
+        },
+    };
+    match std::env::home_dir() {
+        Some(home) => home.join(rest).to_string_lossy().into_owned(),
+        None => path.to_string(),
+    }
+}
+
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
         // Deliberately no `SQLITE_OPEN_CREATE`. With it, a mistyped path is an
@@ -91,6 +108,8 @@ impl Connection {
         // `SQLITE_OPEN_URI` is off for the same reason: the path came out of the
         // URL already, and leaving URI parsing on would make a path containing
         // `?` mean something other than itself.
+        let expanded = home_expanded(path);
+        let path = expanded.as_str();
         if !Path::new(path).exists() {
             return Err(plain_error(trf!("No database file at {}", path)));
         }
