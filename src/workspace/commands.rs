@@ -284,6 +284,7 @@ impl Workspace {
             // read as the chrome.
             Command::ResetEditorZoom => self.set_zoom(FontSlot::Editor, 100, cx),
             Command::OpenSettings => self.open_settings(&OpenSettings, window, cx),
+            Command::ShowDiagram(schema) => self.open_diagram(schema, window, cx),
         }
     }
 

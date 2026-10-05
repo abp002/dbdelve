@@ -285,6 +285,9 @@ impl Workspace {
         if self.close_settings(window, cx) {
             return;
         }
+        if self.close_diagram(cx) {
+            return;
+        }
         if self.cancel_stale_edit(cx) {
             return;
         }

@@ -5,6 +5,7 @@
 //! inherent impl rather than types of their own.
 
 mod commands;
+mod diagram;
 mod editing;
 mod filters;
 mod forms;
@@ -213,6 +214,8 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
+    /// The schema diagram sheet, while it is up.
+    pub(crate) diagram: Option<diagram::DiagramView>,
     /// Why the welcome surface's name field refused what was typed: a line
     /// of its own, so a refusal never covers the notice, which may be the
     /// only word that the profiles file failed to load.
@@ -304,6 +307,7 @@ impl Workspace {
                 .filter(|source| source.found())
                 .collect(),
             welcome_notice: None,
+            diagram: None,
             project_name_error: None,
             welcome_needs_focus: true,
             store_unreadable: false,
@@ -1743,6 +1747,7 @@ impl Render for Workspace {
                 ],
             ))
             .child(div().flex_1().min_h_0().child(main_pane))
+            .children(self.render_diagram(cx))
             .children(self.render_apply_review(cx))
             .children(self.render_close_confirmation(cx))
             .children(self.render_discard_confirmation(cx))

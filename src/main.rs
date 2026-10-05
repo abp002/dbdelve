@@ -5,6 +5,7 @@ mod actions;
 mod completion;
 mod connection_form;
 mod db;
+mod diagram;
 mod explain;
 mod explorer;
 mod export;

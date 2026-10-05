@@ -2442,7 +2442,18 @@ impl Workspace {
                     };
                     let ddl_workspace = menu_workspace.clone();
                     let ddl_names = (schema.clone(), relation.clone());
+                    let diagram_workspace = menu_workspace.clone();
+                    let diagram_schema = schema.clone();
                     let menu = menu
+                        .item(PopupMenuItem::new(tr("Show schema diagram")).on_click(
+                            move |_, window, cx| {
+                                let schema = diagram_schema.clone();
+                                _ = diagram_workspace.update(cx, |workspace, cx| {
+                                    workspace.open_diagram(schema, window, cx);
+                                });
+                            },
+                        ))
+                        .separator()
                         .item(
                             PopupMenuItem::new(tr("Copy DDL")).on_click(move |_, _, cx| {
                                 let (schema, relation) = ddl_names.clone();
