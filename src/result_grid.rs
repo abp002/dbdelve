@@ -18,7 +18,7 @@ use crate::{
     ShowReferences, Workspace,
     db::{self, EditTarget, QueryResult},
     export::{self, RowsAs},
-    i18n::tr,
+    i18n::{tr, trf},
     icons::icon,
     sql::{Mode, SortKey},
     store::{GRID_ROW_CAP, StoredGrid, captured_at},
@@ -81,6 +81,18 @@ pub type RowKey = (String, String, Vec<(String, String)>);
 
 pub struct ResultGrid {
     columns: Vec<Column>,
+    /// The columns as drawn, left to right: indices into `columns`, the pinned
+    /// ones first. A column missing from it is hidden. Everything else in the
+    /// grid -- `active`, the pending edits, the sort -- speaks in indices into
+    /// `columns`, and only the library's side of `TableDelegate` speaks in
+    /// these positions, so the translation lives where `GUTTER` is added and
+    /// taken away and nowhere else.
+    view: Vec<usize>,
+    /// How many leading entries of `view` are pinned to the left edge.
+    pinned: usize,
+    /// The cells the find bar matched, as `(row, column)` in reading order,
+    /// for `data_td` to wash. Sorted, so a cell asks with a binary search.
+    found: Vec<(usize, usize)>,
     result: QueryResult,
     /// Per column, read for every visible cell on every frame, and
     /// `db::is_numeric_type` lowercases the type name to answer.
@@ -290,6 +302,9 @@ impl ResultGrid {
             .collect();
 
         Self {
+            view: (0..result.columns.len()).collect(),
+            pinned: 0,
+            found: Vec::new(),
             columns,
             sort: Vec::new(),
             sortable: false,
@@ -491,6 +506,164 @@ impl ResultGrid {
         for (column, width) in self.columns.iter_mut().zip(widths) {
             column.width = *width;
         }
+    }
+
+    /// The widths as the table draws them, one per drawn column in drawn
+    /// order, which is how a drag reports them.
+    fn set_drawn_widths(&mut self, widths: &[gpui::Pixels]) {
+        for (&col, width) in self.view.iter().zip(widths) {
+            self.columns[col].width = *width;
+        }
+    }
+
+    /// Where a column is drawn, counting from the first after the gutter, or
+    /// `None` while it is hidden.
+    fn position_of(&self, col: usize) -> Option<usize> {
+        self.view.iter().position(|&shown| shown == col)
+    }
+
+    /// The column drawn at a position, counting from the first after the gutter.
+    fn column_at(&self, position: usize) -> Option<usize> {
+        self.view.get(position).copied()
+    }
+
+    /// The library's column index for a column: its position, past the gutter.
+    pub(crate) fn table_col(&self, col: usize) -> Option<usize> {
+        self.position_of(col).map(|position| position + GUTTER)
+    }
+
+    /// Take a column out of the drawn ones. The last one stays: a grid with
+    /// rows and no columns reads as a broken grid, not a choice.
+    pub fn hide_column(&mut self, col: usize) {
+        let Some(position) = self.position_of(col) else {
+            return;
+        };
+        if self.view.len() == 1 {
+            return;
+        }
+        self.view.remove(position);
+        if position < self.pinned {
+            self.pinned -= 1;
+        }
+        // The ring on a hidden column would act on a cell nobody can see.
+        if self.active.is_some_and(|(_, active)| active == col) {
+            self.active = None;
+        }
+    }
+
+    /// Put a hidden column back where it sits among the columns as fetched.
+    pub fn show_column(&mut self, col: usize) {
+        if col >= self.columns.len() || self.position_of(col).is_some() {
+            return;
+        }
+        let at = self.view[self.pinned..]
+            .iter()
+            .position(|&shown| shown > col)
+            .map_or(self.view.len(), |offset| self.pinned + offset);
+        self.view.insert(at, col);
+    }
+
+    pub fn show_all_columns(&mut self) {
+        let pinned: Vec<usize> = self.view[..self.pinned].to_vec();
+        self.view = pinned
+            .iter()
+            .copied()
+            .chain((0..self.columns.len()).filter(|col| !pinned.contains(col)))
+            .collect();
+    }
+
+    /// Every drawn cell whose value holds `needle`, ignoring case, row by row
+    /// and left to right as drawn: the order Enter walks them in. Values as
+    /// fetched; a NULL holds nothing. Stops at `limit`, past which a count is
+    /// all anyone reads.
+    pub fn find(&self, needle: &str, limit: usize) -> Vec<(usize, usize)> {
+        let needle = needle.to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for row in 0..self.result.rows.len() {
+            for &col in &self.view {
+                if self
+                    .cell(row, col)
+                    .is_some_and(|value| value.to_lowercase().contains(&needle))
+                {
+                    found.push((row, col));
+                    if found.len() == limit {
+                        return found;
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The cells to wash as found, or none to clear them.
+    pub fn set_found(&mut self, mut found: Vec<(usize, usize)>) {
+        found.sort_unstable();
+        self.found = found;
+    }
+
+    /// Put the ring on a cell, for the find bar stepping onto a match.
+    pub fn activate(&mut self, row: usize, col: usize) {
+        self.set_active(row, col);
+    }
+
+    pub fn hidden_columns(&self) -> usize {
+        self.columns.len() - self.view.len()
+    }
+
+    pub fn is_pinned(&self, col: usize) -> bool {
+        self.position_of(col)
+            .is_some_and(|position| position < self.pinned)
+    }
+
+    /// Pin a column to the left edge, after the ones pinned before it, or let
+    /// a pinned one go back to its place among the rest.
+    pub fn toggle_pinned(&mut self, col: usize) {
+        let Some(position) = self.position_of(col) else {
+            return;
+        };
+        self.view.remove(position);
+        if position < self.pinned {
+            self.pinned -= 1;
+            let at = self.view[self.pinned..]
+                .iter()
+                .position(|&shown| shown > col)
+                .map_or(self.view.len(), |offset| self.pinned + offset);
+            self.view.insert(at, col);
+        } else {
+            self.view.insert(self.pinned, col);
+            self.pinned += 1;
+        }
+    }
+
+    /// What a later result keeps of this one's hidden and pinned columns, by
+    /// name, so a refresh or the next page does not undo them.
+    pub fn column_view(&self) -> (Vec<String>, usize) {
+        (
+            self.view
+                .iter()
+                .map(|&col| self.result.columns[col].name.clone())
+                .collect(),
+            self.pinned,
+        )
+    }
+
+    /// Lay this result's columns out as an earlier one had them, when it has
+    /// the same columns; any other result starts with every column, unpinned.
+    pub fn with_column_view(mut self, (names, pinned): &(Vec<String>, usize)) -> Self {
+        let view: Option<Vec<usize>> = names
+            .iter()
+            .map(|name| self.result.columns.iter().position(|c| c.name == *name))
+            .collect();
+        if let Some(view) = view
+            && !view.is_empty()
+        {
+            self.pinned = (*pinned).min(view.len());
+            self.view = view;
+        }
+        self
     }
 
     pub fn columns(&self) -> &[crate::db::Column] {
@@ -1446,9 +1619,13 @@ fn commit_and_step(
 ) {
     cx.stop_propagation();
     let grid = table.delegate();
+    // Stepped across the columns as drawn, so `tab` goes to the column on
+    // screen to the right and not to the next one fetched.
     let Some(to) = grid
         .active()
-        .and_then(|from| step_target(from, &step, grid.rows_count(cx), grid.columns.len()))
+        .and_then(|(row, col)| Some((row, grid.position_of(col)?)))
+        .and_then(|from| step_target(from, &step, grid.rows_count(cx), grid.view.len()))
+        .and_then(|(row, position)| Some((row, grid.column_at(position)?)))
     else {
         return;
     };
@@ -1459,7 +1636,11 @@ fn commit_and_step(
     table.delegate_mut().begin_edit(to.0, to.1);
     match step {
         Step::Rows(_) => table.set_selected_row(to.0, cx),
-        Step::Cols(_) => table.set_selected_col(to.1 + GUTTER, cx),
+        Step::Cols(_) => {
+            if let Some(col) = table.delegate().table_col(to.1) {
+                table.set_selected_col(col, cx);
+            }
+        }
     }
 }
 
@@ -1481,9 +1662,15 @@ pub(crate) fn step_pending(
         return;
     };
     table.focus_handle(cx).focus(window, cx);
+    // An edit in a hidden column is still an edit about to be applied, and
+    // stepping to it is the way to see it.
+    table.delegate_mut().show_column(col);
+    table.refresh(cx);
     table.delegate_mut().set_active(row, col);
     table.set_selected_row(row, cx);
-    table.scroll_to_col(col + GUTTER, cx);
+    if let Some(col) = table.delegate().table_col(col) {
+        table.scroll_to_col(col, cx);
+    }
 }
 
 /// Put the ring on a column and bring it into view, for "Go to column". The
@@ -1498,8 +1685,15 @@ pub(crate) fn reveal_column(
         return;
     }
     table.focus_handle(cx).focus(window, cx);
+    // Going to a hidden column is asking to see it.
+    if table.delegate().position_of(col).is_none() {
+        table.delegate_mut().show_column(col);
+        table.refresh(cx);
+    }
     table.delegate_mut().select_col(col);
-    table.scroll_to_col(col + GUTTER, cx);
+    if let Some(col) = table.delegate().table_col(col) {
+        table.scroll_to_col(col, cx);
+    }
     cx.notify();
 }
 
@@ -1524,9 +1718,10 @@ pub(crate) fn keep_active_in_view(
     }
     let from = handle.offset();
     let col = table.delegate_mut().relaid_out(width, from.x)?;
+    let col = table.delegate().table_col(col)?;
     // The library keeps the offset that brings a column into view private;
     // jumping there is the only way to learn it, so jump back straight after.
-    table.scroll_to_col(col + GUTTER, cx);
+    table.scroll_to_col(col, cx);
     let to = handle.offset().x;
     handle.set_offset(from);
     // A glide that goes nowhere would still stop a wheel's in flight.
@@ -1683,7 +1878,7 @@ fn reorder<T: Default>(items: &mut Vec<T>, order: &[usize]) {
 
 impl TableDelegate for ResultGrid {
     fn columns_count(&self, _: &App) -> usize {
-        self.columns.len() + GUTTER
+        self.view.len() + GUTTER
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -1745,7 +1940,13 @@ impl TableDelegate for ResultGrid {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         match col_ix.checked_sub(GUTTER) {
-            Some(col) => self.columns[col].clone(),
+            Some(position) => {
+                let column = self.columns[self.view[position]].clone();
+                match position < self.pinned {
+                    true => column.fixed_left(),
+                    false => column,
+                }
+            }
             None => Column::new("row-number", "#")
                 .width(px(self.gutter_width()))
                 .resizable(false)
@@ -1762,7 +1963,7 @@ impl TableDelegate for ResultGrid {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        match col_ix.checked_sub(GUTTER) {
+        match col_ix.checked_sub(GUTTER).and_then(|p| self.column_at(p)) {
             Some(col) => self.data_th(col, window, cx).into_any_element(),
             None => {
                 let faint = theme(cx).text_faint;
@@ -1789,7 +1990,7 @@ impl TableDelegate for ResultGrid {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        match col_ix.checked_sub(GUTTER) {
+        match col_ix.checked_sub(GUTTER).and_then(|p| self.column_at(p)) {
             Some(col) => self.data_td(row_ix, col, window, cx).into_any_element(),
             None => {
                 let (faint, text, selected_bg) = {
@@ -1886,10 +2087,28 @@ impl TableDelegate for ResultGrid {
             1 => tr("Copy Row As"),
             _ => tr("Copy Rows As"),
         };
+        let hidden = self.hidden_columns();
         let menu = menu
             .when_some(self.focus.clone(), PopupMenu::action_context)
             .menu(tr("Copy Cell"), Box::new(crate::CopyCell))
             .item(PopupMenuItem::submenu(rows_as_label, rows_as))
+            .separator()
+            .when(self.view.len() > 1, |menu| {
+                menu.menu(tr("Hide Column"), Box::new(crate::HideColumn))
+            })
+            .menu(
+                match self.is_pinned(col) {
+                    true => tr("Unpin Column"),
+                    false => tr("Pin Column to the Left"),
+                },
+                Box::new(crate::TogglePinColumn),
+            )
+            .when(hidden > 0, |menu| {
+                menu.menu(
+                    trf!("Show All Columns ({} hidden)", hidden),
+                    Box::new(crate::ShowAllColumns),
+                )
+            })
             .when(!stages.is_empty(), PopupMenu::separator);
         stages
             .into_iter()
@@ -2210,6 +2429,10 @@ impl ResultGrid {
             })
             // Italic so a NULL cannot be mistaken for the four-letter string.
             .when(cell.is_none(), |cell| cell.italic())
+            .when(
+                pending.is_none() && self.found.binary_search(&(row_ix, col_ix)).is_ok(),
+                |cell| cell.bg(crate::theme::ConnectionColor::Yellow.band(palette)),
+            )
             .when(pending.is_some(), |cell| cell.bg(edited_bg))
             // The value is the child that gives way, beside an arrow or not.
             // Bare text in a row does not shrink and a flex container does not
@@ -2356,10 +2579,15 @@ pub(crate) fn new_grid(
         }
         TableEvent::ColumnWidthsChanged(widths) => {
             let widths = widths.get(GUTTER..).unwrap_or_default().to_vec();
-            table.update(cx, |table, _| table.delegate_mut().set_widths(&widths));
+            table.update(cx, |table, _| {
+                table.delegate_mut().set_drawn_widths(&widths)
+            });
         }
         TableEvent::SelectColumn(col) => {
             let Some(col) = col.checked_sub(GUTTER) else {
+                return;
+            };
+            let Some(col) = table.read(cx).delegate().column_at(col) else {
                 return;
             };
             table.update(cx, |table, cx| {

@@ -1315,6 +1315,7 @@ impl Workspace {
                 widths,
                 vertical,
                 table.horizontal_scroll_handle.offset(),
+                table.delegate().column_view(),
             )
         };
         if !keep_rows && explain.is_none() {
@@ -1488,12 +1489,13 @@ impl Workspace {
                                 let produced_grid = !result.columns.is_empty();
                                 results.update(cx, |table, cx| {
                                     let sort = sort_columns(engine, &keys, &result.columns);
-                                    let (names, widths, vertical, horizontal) = &shown;
+                                    let (names, widths, vertical, horizontal, column_view) = &shown;
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
                                         .with_engine(engine)
                                         .with_sort(sort, sortable)
                                         .with_client_sort(client_keys.as_deref())
-                                        .with_layout(names, widths);
+                                        .with_layout(names, widths)
+                                        .with_column_view(column_view);
                                     // Rows kept through a refresh kept their
                                     // selection too, and its index now names
                                     // whichever row the new result put there.

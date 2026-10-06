@@ -8,6 +8,7 @@ mod commands;
 mod diagram;
 mod editing;
 mod filters;
+mod find;
 mod forms;
 mod modes;
 mod objects;
@@ -219,6 +220,8 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
+    /// The find bar over the results, while it is up.
+    pub(crate) find: Option<find::FindBar>,
     /// The schema diagram sheet, while it is up.
     pub(crate) diagram: Option<diagram::DiagramView>,
     /// Why the welcome surface's name field refused what was typed: a line
@@ -313,6 +316,7 @@ impl Workspace {
                 .collect(),
             welcome_notice: None,
             diagram: None,
+            find: None,
             project_name_error: None,
             welcome_needs_focus: true,
             store_unreadable: false,
@@ -1132,6 +1136,7 @@ impl Render for Workspace {
             });
         let paging = views::render_paging(profile, cx);
         let view_sorting = views::render_view_sorting(profile, cx);
+        let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
             .session
             .active_object()
@@ -1329,6 +1334,7 @@ impl Render for Workspace {
             || notice.is_some()
             || paging.is_some()
             || view_sorting.is_some()
+            || hidden_columns.is_some()
             || query_status.is_some()
             || refreshable_snapshot
             || has_results
@@ -1356,6 +1362,7 @@ impl Render for Workspace {
                         .items_center()
                         .gap(px(layout::SPACE_SM))
                         .children(view_sorting)
+                        .children(hidden_columns)
                         .children(left_stats.map(|stats| {
                             div()
                                 .flex_shrink_0()
@@ -1573,6 +1580,7 @@ impl Render for Workspace {
                 &self.tab_strip,
                 cx,
             )))
+            .children(self.render_find_bar(cx))
             .children(results_status);
         // The strip's chips glide for as long as the render above found one
         // still on its way.
@@ -1670,6 +1678,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::fuzzy_open))
             .on_action(cx.listener(Self::go_to_column))
+            .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::palette_next))
             .on_action(cx.listener(Self::palette_previous))
