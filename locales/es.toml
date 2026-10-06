@@ -807,3 +807,7 @@
 "N:1, optional" = "N:1, opcional"
 "N:1, required" = "N:1, obligatoria"
 "{} views" = "{} vistas"
+"Go to Column" = "Ir a columna"
+"Go to column" = "Ir a columna"
+"Go to a column…" = "Ir a una columna…"
+"The rows on screen have no column {}." = "Las filas en pantalla no tienen la columna {}."

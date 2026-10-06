@@ -52,6 +52,8 @@ pub enum Mode {
     Theme,
     /// The databases on the active profile's server, as last fetched.
     Database,
+    /// The columns of the grid in front, to jump to one of them.
+    Columns,
 }
 
 /// What a row does when it is confirmed.
@@ -136,6 +138,10 @@ pub enum Command {
     ToggleRowPanel,
     ResetEditorZoom,
     OpenSettings,
+    /// Put the palette up over the columns of the grid in front.
+    GoToColumn,
+    /// Scroll the grid in front to this column, by index into its columns.
+    RevealColumn(usize),
     /// Put the schema diagram up over the workspace.
     ShowDiagram(String),
 }
@@ -191,6 +197,7 @@ impl Palette {
             (Mode::History, Some(profile)) => history_items(profile),
             (Mode::Font(slot), Some(_)) => font_items(slot, cx),
             (Mode::Database, Some(profile)) => database_items(profile),
+            (Mode::Columns, Some(profile)) => column_items(profile, cx),
             (_, None) => Vec::new(),
         };
         Self {
@@ -225,6 +232,7 @@ impl Palette {
             Mode::Font(_) => tr("Pick a font…"),
             Mode::Theme => tr("Pick a theme…"),
             Mode::Database => tr("Switch database…"),
+            Mode::Columns => tr("Go to a column…"),
         }
     }
 }
@@ -382,6 +390,26 @@ fn jump_items(profile: &Profile) -> Vec<Item> {
         );
     }
     items
+}
+
+/// The columns of the grid in front, in their order, with their types.
+fn column_items(profile: &Profile, cx: &App) -> Vec<Item> {
+    let Some(results) = profile.session.active_results() else {
+        return Vec::new();
+    };
+    results
+        .read(cx)
+        .delegate()
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(index, column)| Item {
+            label: column.name.clone(),
+            hint: column.data_type.clone().unwrap_or_default().into(),
+            icon: icon::STRUCTURE,
+            command: Command::RevealColumn(index),
+        })
+        .collect()
 }
 
 /// Every statement this profile has run, newest first.
@@ -670,6 +698,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // Only over a grid that has a result set behind it. A surface that has run
     // nothing has nothing to write out.
     if workspace.has_results(cx) {
+        items.push(Item::command(
+            tr("Go to column"),
+            chord_hint("go_to_column", overrides),
+            icon::STRUCTURE,
+            Command::GoToColumn,
+        ));
         items.push(Item::command(
             tr("Export results as CSV"),
             "",

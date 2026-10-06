@@ -1486,6 +1486,23 @@ pub(crate) fn step_pending(
     table.scroll_to_col(col + GUTTER, cx);
 }
 
+/// Put the ring on a column and bring it into view, for "Go to column". The
+/// ring stays on the row it was on, so the eye lands on the same record.
+pub(crate) fn reveal_column(
+    table: &mut TableState<ResultGrid>,
+    col: usize,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    if col >= table.delegate().columns().len() {
+        return;
+    }
+    table.focus_handle(cx).focus(window, cx);
+    table.delegate_mut().select_col(col);
+    table.scroll_to_col(col + GUTTER, cx);
+    cx.notify();
+}
+
 /// Scroll the active cell back into view when the grid's width changes under
 /// it. The row panel is what usually changes it: the click that selects a row
 /// opens the panel beside the grid, and any scroll into view that click caused
