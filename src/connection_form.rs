@@ -104,7 +104,9 @@ impl ConnectionForm {
             _ => None,
         };
         let file = match config {
-            Some(ConnectionConfig::Sqlite { path, .. }) => Some(path.as_str()),
+            Some(ConnectionConfig::Sqlite { path, .. } | ConnectionConfig::DuckDb { path, .. }) => {
+                Some(path.as_str())
+            }
             _ => None,
         };
         let mongo = match config {
@@ -344,6 +346,15 @@ impl ConnectionForm {
                     statement_timeout,
                 }
             }
+            // No file is a database in memory, which is what a profile for
+            // reading CSV and Parquet files wants.
+            Engine::DuckDb => ConnectionConfig::DuckDb {
+                path: match read(&self.path) {
+                    path if path.is_empty() => crate::db::DUCKDB_IN_MEMORY.to_string(),
+                    path => path,
+                },
+                statement_timeout,
+            },
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
@@ -549,6 +560,10 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
         }
         .clone(),
         ConnectionConfig::Sqlite { path, .. } => file_stem(path).to_string(),
+        ConnectionConfig::DuckDb { path, .. } if path == crate::db::DUCKDB_IN_MEMORY => {
+            "DuckDB".to_string()
+        }
+        ConnectionConfig::DuckDb { path, .. } => file_stem(path).to_string(),
         ConnectionConfig::Snowflake(account) => account.database.clone(),
     }
 }

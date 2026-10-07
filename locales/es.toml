@@ -825,3 +825,8 @@
 "Previous match (Shift+Enter)" = "Anterior (Mayús+Intro)"
 "Next match (Enter)" = "Siguiente (Intro)"
 "Close (Esc)" = "Cerrar (Esc)"
+"Open" = "Abrir"
+"Files" = "Ficheros"
+"in memory" = "en memoria"
+"DBDelve opens .csv, .tsv, .parquet, .json and .xlsx files." = "DBDelve abre ficheros .csv, .tsv, .parquet, .json y .xlsx."
+"Open data file (CSV, Excel, Parquet, JSON)…" = "Abrir fichero de datos (CSV, Excel, Parquet, JSON)…"

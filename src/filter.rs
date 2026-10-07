@@ -377,6 +377,7 @@ pub(crate) fn derived_filter(
                 | Engine::MySql
                 | Engine::MariaDb
                 | Engine::Sqlite
+                | Engine::DuckDb
                 | Engine::Snowflake
                 | Engine::SqlServer => {
                     format!("({left}) {} ({predicate})", bar.conjunction.as_str())
@@ -406,6 +407,7 @@ pub(crate) fn bar_predicate(
             | Engine::MySql
             | Engine::MariaDb
             | Engine::Sqlite
+            | Engine::DuckDb
             | Engine::Snowflake
             | Engine::SqlServer => value.to_string(),
         });
@@ -459,6 +461,7 @@ pub(crate) fn filter_predicate(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -519,6 +522,7 @@ pub(crate) fn filter_predicate(
         // `Operator::on` is what refuses (spec §7).
         Operator::Regex => match engine {
             Engine::Postgres => comparison("~"),
+            Engine::DuckDb => Some(format!("regexp_matches({name}, {})", literal(value))),
             Engine::MySql => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
             // MariaDB has no `REGEXP_LIKE`, and its infix `REGEXP` is not in
             // the grammar; `REGEXP_INSTR` is a plain function that matches
@@ -761,6 +765,7 @@ pub(crate) fn sort_expression(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }

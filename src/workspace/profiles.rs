@@ -99,6 +99,10 @@ impl Workspace {
                 path: stored.path.unwrap_or_default(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
             },
+            Engine::DuckDb => ConnectionConfig::DuckDb {
+                path: stored.path.unwrap_or_default(),
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            },
             Engine::Postgres
             | Engine::MySql
             | Engine::MariaDb
@@ -343,7 +347,7 @@ impl Workspace {
         // throw away a half-typed connection to a different database, which the
         // user never asked to lose by pasting a URL.
         let filled = match &config {
-            ConnectionConfig::Sqlite { path, .. } => vec![
+            ConnectionConfig::Sqlite { path, .. } | ConnectionConfig::DuckDb { path, .. } => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.path, path.clone()),
             ],
@@ -1298,6 +1302,7 @@ impl Workspace {
                     {
                         workspace.load_relation(object, cx);
                     }
+                    workspace.run_waiting_files(cx);
                     cx.notify();
                 })
                 .ok();

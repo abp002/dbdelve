@@ -26,7 +26,7 @@ use rusqlite::{Batch, InterruptHandle, OpenFlags};
 
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, ForeignKey, NamedDefinition, QueryResult,
-    Reference, Structure, assemble_catalog, assemble_references, assemble_structure,
+    Reference, Structure, assemble_catalog, assemble_references, assemble_structure, home_expanded,
     non_utf8_error, percent_decoded, plain_error, required_cell,
 };
 use crate::i18n::{tr, trf};
@@ -78,23 +78,6 @@ pub struct Connection {
     /// The profile's statement timeout. SQLite has no such setting, so this is
     /// a wall-clock timer firing the same interrupt — see `run`.
     statement_timeout: Option<Duration>,
-}
-
-/// `~/x` as the file under the home directory, the way a shell would read it.
-/// A path is typed into the form as often as it is picked, and `~` is how
-/// people type their home; left alone it names a directory called `~`.
-fn home_expanded(path: &str) -> String {
-    let rest = match path {
-        "~" => "",
-        _ => match path.strip_prefix("~/") {
-            Some(rest) => rest,
-            None => return path.to_string(),
-        },
-    };
-    match std::env::home_dir() {
-        Some(home) => home.join(rest).to_string_lossy().into_owned(),
-        None => path.to_string(),
-    }
 }
 
 impl Connection {

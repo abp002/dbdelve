@@ -23,7 +23,8 @@ use sqlparser::ast::{
     Statement, UtilityOption,
 };
 use sqlparser::dialect::{
-    Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+    Dialect, DuckDbDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    SnowflakeDialect,
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
@@ -68,6 +69,7 @@ impl Buffer {
             | Engine::MySql
             | Engine::MariaDb
             | Engine::Sqlite
+            | Engine::DuckDb
             | Engine::Snowflake => statements_in(sql),
         };
 
@@ -143,6 +145,7 @@ pub(crate) fn queued_statements(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::MongoDb => Buffer::for_engine(engine, sql).statements().to_vec(),
     };
@@ -170,6 +173,7 @@ pub(crate) fn expected_sets(engine: Engine, sql: &str) -> usize {
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::MongoDb => 1,
     }
@@ -223,6 +227,7 @@ pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -275,6 +280,7 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -455,6 +461,7 @@ pub fn insert_row(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -509,6 +516,7 @@ pub fn delete_row(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -609,6 +617,7 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => is_generated_write(statement),
     }
@@ -622,6 +631,7 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => delete_matches_key(statement, keys),
     }
@@ -652,6 +662,7 @@ pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -1433,6 +1444,7 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -1673,6 +1685,7 @@ pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => Ok(()),
     }
@@ -1690,6 +1703,7 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         Engine::Postgres => Box::new(PostgreSqlDialect {}),
         Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
         Engine::Sqlite => Box::new(SQLiteDialect {}),
+        Engine::DuckDb => Box::new(DuckDbDialect {}),
         Engine::Snowflake => Box::new(SnowflakeDialect {}),
         Engine::SqlServer => Box::new(MsSqlDialect {}),
         Engine::MongoDb => return crate::mql::classify(sql),
@@ -2160,9 +2174,12 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> 
     let dialect = match engine {
         Engine::MongoDb => return crate::mql::format(sql),
         Engine::SqlServer => sqlformat::Dialect::SQLServer,
-        Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
-            sqlformat::Dialect::Generic
-        }
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::DuckDb
+        | Engine::Snowflake => sqlformat::Dialect::Generic,
     };
     if has_dollar_quote(sql) {
         return Err(tr(
