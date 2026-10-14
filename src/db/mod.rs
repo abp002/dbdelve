@@ -29,6 +29,7 @@ mod postgres;
 mod snowflake;
 mod sqlite;
 mod ssh;
+mod turso;
 mod xlsx;
 
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
@@ -52,6 +53,43 @@ pub struct CancelToken(Arc<Mutex<Cancelling>>);
 struct Cancelling {
     asked: bool,
     handles: Vec<String>,
+    /// `Some` for a run made by [`CancelToken::alongside`]: the connections
+    /// its statements are running on, each emptied once its statement ends.
+    alongside: Option<Vec<Option<Connection>>>,
+}
+
+impl CancelToken {
+    /// For a run whose statements each go out on a connection of their own
+    /// ([`Connection::query_alongside`]). A cancel under it stops those, and
+    /// never what the connection it is asked on is running, which is some
+    /// other tab's statement or nothing, unless one of its statements fell
+    /// back to that connection and is running there.
+    pub fn alongside() -> Self {
+        Self(Arc::new(Mutex::new(Cancelling {
+            alongside: Some(Vec::new()),
+            ..Cancelling::default()
+        })))
+    }
+
+    /// Whether the two are one run's.
+    pub fn is(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Mark the run cancelled and hand back the connections it is running on,
+    /// or `None` for a run on the profile's own.
+    fn stop_alongside(&self) -> Option<Vec<Connection>> {
+        let mut running = self.0.lock().ok()?;
+        let connections = running
+            .alongside
+            .as_ref()?
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        running.asked = true;
+        Some(connections)
+    }
 }
 
 /// Which engine a profile talks to.
@@ -67,6 +105,7 @@ pub enum Engine {
     MariaDb,
     Sqlite,
     DuckDb,
+    Turso,
     Snowflake,
     SqlServer,
     MongoDb,
@@ -100,6 +139,13 @@ impl Syntax {
         match self {
             Self::Sql => "sql",
             Self::Mongo => "javascript",
+        }
+    }
+
+    pub fn line_comment(self) -> &'static str {
+        match self {
+            Self::Sql => "--",
+            Self::Mongo => "//",
         }
     }
 
@@ -151,12 +197,13 @@ impl ExplainMode {
 
 impl Engine {
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Postgres,
         Self::MySql,
         Self::MariaDb,
         Self::Sqlite,
         Self::DuckDb,
+        Self::Turso,
         Self::Snowflake,
         Self::SqlServer,
         Self::MongoDb,
@@ -169,6 +216,7 @@ impl Engine {
             Self::MariaDb => "MariaDB",
             Self::Sqlite => "SQLite",
             Self::DuckDb => "DuckDB",
+            Self::Turso => "Turso",
             Self::Snowflake => "Snowflake",
             Self::SqlServer => "SQL Server",
             Self::MongoDb => "MongoDB",
@@ -184,6 +232,7 @@ impl Engine {
             Self::MariaDb => "mariadb",
             Self::Sqlite => "sqlite",
             Self::DuckDb => "duckdb",
+            Self::Turso => "turso",
             Self::Snowflake => "snowflake",
             Self::SqlServer => "mssql",
             Self::MongoDb => "mongodb",
@@ -199,6 +248,7 @@ impl Engine {
             "mariadb" => Ok(Self::MariaDb),
             "sqlite" | "sqlite3" | "file" => Ok(Self::Sqlite),
             "duckdb" => Ok(Self::DuckDb),
+            "turso" => Ok(Self::Turso),
             "snowflake" => Ok(Self::Snowflake),
             "mssql" | "sqlserver" => Ok(Self::SqlServer),
             "mongodb" | "mongodb+srv" => Ok(Self::MongoDb),
@@ -213,7 +263,7 @@ impl Engine {
             Self::MySql | Self::MariaDb => Some(mysql::DEFAULT_PORT),
             Self::SqlServer => Some(mssql::DEFAULT_PORT),
             Self::MongoDb => Some(mongo::DEFAULT_PORT),
-            Self::Sqlite | Self::DuckDb | Self::Snowflake => None,
+            Self::Sqlite | Self::DuckDb | Self::Turso | Self::Snowflake => None,
         }
     }
 
@@ -226,7 +276,7 @@ impl Engine {
             Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer | Self::MongoDb => {
                 Fields::Server
             }
-            Self::Sqlite | Self::DuckDb => Fields::File,
+            Self::Sqlite | Self::DuckDb | Self::Turso => Fields::File,
             Self::Snowflake => Fields::Account,
         }
     }
@@ -242,6 +292,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => false,
         }
@@ -257,6 +308,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => false,
         }
@@ -286,6 +338,7 @@ impl Engine {
             // A plan as box-drawn text in one column, a shape `explain.rs`
             // does not read yet.
             (Self::DuckDb, _) => None,
+            (Self::Turso, _) => None,
             // Its plan is a fourth shape `explain.rs` does not read yet.
             (Self::Snowflake, _) => None,
             // SQL Server has no prefix form. A plan comes from `SET SHOWPLAN_XML
@@ -312,6 +365,7 @@ impl Engine {
                 | Self::MariaDb
                 | Self::Sqlite
                 | Self::DuckDb
+                | Self::Turso
                 | Self::Snowflake
                 | Self::SqlServer,
                 ExplainMode::Plan | ExplainMode::Analyze,
@@ -335,7 +389,7 @@ impl Engine {
             // One simple-query submission is already one implicit transaction.
             Self::Postgres => None,
             Self::MySql | Self::MariaDb => Some("BEGIN"),
-            Self::Sqlite | Self::DuckDb => Some("BEGIN"),
+            Self::Sqlite | Self::DuckDb | Self::Turso => Some("BEGIN"),
             // Every statement autocommits unless the submission brackets it.
             Self::Snowflake => Some("BEGIN"),
             // A bare `BEGIN` opens a statement block in T-SQL, not a
@@ -360,7 +414,7 @@ impl Engine {
                 true
             }
             // A document has no column defaults to fall back to.
-            Self::Sqlite | Self::DuckDb | Self::MongoDb => false,
+            Self::Sqlite | Self::DuckDb | Self::Turso | Self::MongoDb => false,
         }
     }
 
@@ -374,6 +428,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => true,
             Self::MongoDb => kind != RelationKind::View,
@@ -393,6 +448,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::Snowflake
             | Self::MongoDb => false,
         }
@@ -410,6 +466,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::SqlServer
             | Self::MongoDb => false,
         }
@@ -428,6 +485,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::Snowflake
             | Self::MongoDb => "COUNT(*)",
         }
@@ -472,6 +530,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => Syntax::Sql,
             Self::MongoDb => Syntax::Mongo,
@@ -499,7 +558,9 @@ impl Engine {
             // Snowflake folds an unquoted name to upper case and reads a quoted
             // one exactly, and the catalog reports names as stored -- so quoting
             // what the catalog said is always the name it meant.
-            Self::Postgres | Self::Sqlite | Self::DuckDb | Self::Snowflake => Some('"'),
+            Self::Postgres | Self::Sqlite | Self::DuckDb | Self::Turso | Self::Snowflake => {
+                Some('"')
+            }
             // Not T-SQL's own `[name]`: the grammar every gate in `sql.rs`
             // parses with has no brackets, and the pin does not move. The
             // standard quote names an identifier under `QUOTED_IDENTIFIER`,
@@ -548,7 +609,7 @@ impl Engine {
     /// survive as two.
     pub fn quote_literal(self, value: &str) -> String {
         match self {
-            Self::Postgres | Self::Sqlite | Self::DuckDb => {
+            Self::Postgres | Self::Sqlite | Self::DuckDb | Self::Turso => {
                 format!("'{}'", value.replace('\'', "''"))
             }
             // Snowflake reads a backslash as an escape too, and unconditionally.
@@ -655,6 +716,7 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::DuckDb
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => tr("an ORDER BY"),
             Self::MongoDb => tr("a sort"),
@@ -713,23 +775,6 @@ fn iso_datetime(value: &str) -> Option<String> {
 
 /// A URL is percent-encoded by definition, and a path with a space in it is
 /// ordinary on macOS.
-/// `~/x` as the file under the home directory, the way a shell would read it.
-/// A path is typed into the form as often as it is picked, and `~` is how
-/// people type their home; left alone it names a directory called `~`.
-pub(super) fn home_expanded(path: &str) -> String {
-    let rest = match path {
-        "~" => "",
-        _ => match path.strip_prefix("~/") {
-            Some(rest) => rest,
-            None => return path.to_string(),
-        },
-    };
-    match std::env::home_dir() {
-        Some(home) => home.join(rest).to_string_lossy().into_owned(),
-        None => path.to_string(),
-    }
-}
-
 pub(super) fn percent_decoded(value: &str) -> Result<String, String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -917,6 +962,10 @@ pub enum ConnectionConfig {
         path: String,
         statement_timeout: u32,
     },
+    Turso {
+        path: String,
+        statement_timeout: u32,
+    },
     Snowflake(SnowflakeConfig),
     MongoDb(MongoConfig),
 }
@@ -930,6 +979,7 @@ impl ConnectionConfig {
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite { .. } => Engine::Sqlite,
             Self::DuckDb { .. } => Engine::DuckDb,
+            Self::Turso { .. } => Engine::Turso,
             Self::Snowflake(_) => Engine::Snowflake,
             Self::MongoDb(_) => Engine::MongoDb,
         }
@@ -944,7 +994,9 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mongo.server),
-            Self::Sqlite { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => None,
+            Self::Sqlite { .. } | Self::DuckDb { .. } | Self::Turso { .. } | Self::Snowflake(_) => {
+                None
+            }
         }
     }
 
@@ -957,7 +1009,9 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mut mongo.server),
-            Self::Sqlite { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => None,
+            Self::Sqlite { .. } | Self::DuckDb { .. } | Self::Turso { .. } | Self::Snowflake(_) => {
+                None
+            }
         }
     }
 
@@ -969,7 +1023,8 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => server.database = name,
             Self::MongoDb(mongo) => mongo.set_database(name),
-            Self::Sqlite { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => {}
+            Self::Sqlite { .. } | Self::DuckDb { .. } | Self::Turso { .. } | Self::Snowflake(_) => {
+            }
         }
     }
 
@@ -1007,6 +1062,10 @@ impl ConnectionConfig {
                 path,
                 statement_timeout: 0,
             }),
+            Engine::Turso => sqlite::path_from_url(url).map(|path| Self::Turso {
+                path,
+                statement_timeout: 0,
+            }),
             // Nobody pastes a Snowflake URL, because there is no such form.
             Engine::Snowflake => {
                 Err(tr("Snowflake has no connection URL. Fill the fields in instead.").to_string())
@@ -1028,6 +1087,9 @@ impl ConnectionConfig {
                 statement_timeout, ..
             }
             | Self::DuckDb {
+                statement_timeout, ..
+            }
+            | Self::Turso {
                 statement_timeout, ..
             } => *statement_timeout,
             Self::Snowflake(account) => account.statement_timeout,
@@ -1061,9 +1123,10 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => server.endpoint(),
             Self::MongoDb(mongo) => mongo.endpoint(),
-            Self::Sqlite { path, .. } => path.clone(),
             Self::DuckDb { path, .. } if path == DUCKDB_IN_MEMORY => tr("in memory").to_string(),
-            Self::DuckDb { path, .. } => path.clone(),
+            Self::Sqlite { path, .. } | Self::DuckDb { path, .. } | Self::Turso { path, .. } => {
+                path.clone()
+            }
             Self::Snowflake(account) => account.host(),
         }
     }
@@ -1079,6 +1142,7 @@ pub enum Connection {
     SqlServer(mssql::Connection),
     Sqlite(sqlite::Connection),
     DuckDb(duckdb::Connection),
+    Turso(turso::Connection),
     Snowflake(snowflake::Connection),
     MongoDb(mongo::Connection),
 }
@@ -1106,6 +1170,10 @@ impl Connection {
                 path,
                 statement_timeout,
             } => duckdb::Connection::open(&path, statement_timeout).map(Self::DuckDb),
+            ConnectionConfig::Turso {
+                path,
+                statement_timeout,
+            } => turso::Connection::open(&path, statement_timeout).map(Self::Turso),
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
@@ -1115,18 +1183,117 @@ impl Connection {
 
     /// Run one statement verbatim.
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Row
-    /// limits belong to the caller that *generated* a query, never to one the
-    /// user typed.
-    pub fn query(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    /// The SQL is never rewritten — no limit injected, no reformatting. A
+    /// limit bounds the rows kept, not the statement: past it they are read
+    /// and dropped, and [`QueryResult::capped_from`] says how many there were,
+    /// unless the statement could be stopped there instead
+    /// ([`QueryResult::stopped`]). A feed takes the rows as they arrive
+    /// instead of the result, which then holds none of them, and values
+    /// still waiting on their types are the caller's to [`render`]. Postgres,
+    /// MySQL, SQL Server, SQLite, Snowflake and MongoDB honour [`Fetch`]: SQL
+    /// Server by `SET ROWCOUNT` around a lone read, which the server stops
+    /// itself, and by draining anything else, Snowflake by not downloading the partitions
+    /// past the limit, whose rows the server has already counted, and MongoDB
+    /// without a feed.
+    pub fn query(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
         match self {
-            Self::Postgres(connection) => connection.query(sql),
-            Self::MySql(connection) => connection.query(sql),
-            Self::SqlServer(connection) => connection.query(sql),
-            Self::Sqlite(connection) => connection.query(sql),
-            Self::DuckDb(connection) => connection.query(sql),
-            Self::Snowflake(connection) => connection.query_with(sql, cancel),
-            Self::MongoDb(connection) => connection.query(sql, cancel),
+            Self::Postgres(connection) => connection.query(sql, fetch),
+            Self::MySql(connection) => connection.query(sql, fetch),
+            Self::SqlServer(connection) => connection.query(sql, fetch),
+            Self::Sqlite(connection) => connection.query(sql, fetch),
+            Self::DuckDb(connection) => connection.query(sql, fetch),
+            Self::Turso(connection) => connection.query(sql, fetch),
+            Self::Snowflake(connection) => connection.query_with(sql, cancel, fetch),
+            Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
+        }
+    }
+
+    /// [`Connection::query`] on a connection of its own, opened the way this
+    /// one was (its tunnel and side session shared), so the statement runs
+    /// beside whatever this one is running rather than queued behind it, and
+    /// closed once it ends. Snowflake and MongoDB need no second one: they
+    /// already run statements side by side, and stop them by `cancel`.
+    ///
+    /// `cancel` is made by [`CancelToken::alongside`]. `read_only` puts the
+    /// profile's Read-only hold on the new session as well.
+    pub fn query_alongside(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+        read_only: bool,
+    ) -> Result<QueryResult, DbError> {
+        let opened = match self {
+            Self::Snowflake(_) | Self::MongoDb(_) => return self.query(sql, cancel, fetch),
+            Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
+            Self::MySql(connection) => connection.alongside().map(Self::MySql),
+            Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
+            Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
+            Self::DuckDb(connection) => connection.alongside().map(Self::DuckDb),
+            Self::Turso(connection) => connection.alongside().map(Self::Turso),
+        };
+        // A server out of connections still has this one, which the statement
+        // waits its turn on rather than failing. SQL Server logs in on the
+        // first run, so its refusal surfaces as the statement's error instead.
+        let (connection, shared) = match opened {
+            Ok(connection) => {
+                if read_only {
+                    connection.set_read_only(true)?;
+                }
+                (connection, false)
+            }
+            Err(_) => (self.clone(), true),
+        };
+        let slot = std::cell::Cell::new(None);
+        // A shared connection becomes the run's to stop only once this
+        // statement holds it; until then a Cancel just marks the run, and
+        // the statement is dropped unsent when its turn comes.
+        // ponytail: it is let go of just after the connection is, so a Cancel
+        // in between reaches whatever took the connection next. Closing that
+        // gap needs the engine to clear it under its own lock.
+        let hold = || {
+            let mut running = cancel
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if running.asked {
+                return false;
+            }
+            let alongside = running.alongside.get_or_insert_default();
+            alongside.push(Some(connection.clone()));
+            slot.set(Some(alongside.len() - 1));
+            true
+        };
+        let result = match shared {
+            true => connection.query(
+                sql,
+                cancel,
+                Fetch {
+                    held: Some(&hold),
+                    ..fetch
+                },
+            ),
+            false if hold() => connection.query(sql, cancel, fetch),
+            false => Err(plain_error(tr("Cancelled before it was sent.").into())),
+        };
+        if let Some(slot) = slot.get()
+            && let Ok(mut running) = cancel.0.lock()
+            && let Some(alongside) = &mut running.alongside
+        {
+            alongside[slot] = None;
+        }
+        result
+    }
+
+    /// Open now what the first run would otherwise wait on opening.
+    pub fn warm(&self) {
+        if let Self::Postgres(connection) = self {
+            connection.warm();
         }
     }
 
@@ -1134,15 +1301,38 @@ impl Connection {
     /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
     /// Server alone runs it differently: its session options are the user's to
     /// `SET`, and dbdelve's SQL is written for particular ones.
-    pub fn generated(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    ///
+    /// A `feed` takes its rows as they arrive, as for [`Connection::query`];
+    /// the statement carries its own `LIMIT`, so nothing else of [`Fetch`]
+    /// applies.
+    pub fn generated(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        feed: Option<&Feed>,
+    ) -> Result<QueryResult, DbError> {
         match self {
-            Self::SqlServer(connection) => connection.generated(sql),
+            Self::SqlServer(connection) => connection.generated(
+                sql,
+                Fetch {
+                    feed,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
+            | Self::Turso(_)
             | Self::Snowflake(_)
-            | Self::MongoDb(_) => self.query(sql, cancel),
+            | Self::MongoDb(_) => self.query(
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    ..Fetch::default()
+                },
+            ),
         }
     }
 
@@ -1161,6 +1351,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.catalog(),
             Self::Sqlite(connection) => connection.catalog(),
             Self::DuckDb(connection) => connection.catalog(),
+            Self::Turso(connection) => connection.catalog(),
             Self::Snowflake(connection) => connection.catalog(),
             Self::MongoDb(connection) => connection.catalog(),
         }
@@ -1175,6 +1366,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.routines(),
             Self::Sqlite(connection) => connection.routines(),
             Self::DuckDb(connection) => connection.routines(),
+            Self::Turso(connection) => connection.routines(),
             Self::Snowflake(connection) => connection.routines(),
             Self::MongoDb(connection) => connection.routines(),
         }
@@ -1194,9 +1386,11 @@ impl Connection {
             Self::Postgres(connection) => connection.sizes(),
             Self::MySql(connection) => connection.sizes(),
             Self::MongoDb(connection) => connection.sizes(),
-            Self::SqlServer(_) | Self::Sqlite(_) | Self::DuckDb(_) | Self::Snowflake(_) => {
-                Ok(Sizes::new())
-            }
+            Self::SqlServer(_)
+            | Self::Sqlite(_)
+            | Self::DuckDb(_)
+            | Self::Turso(_)
+            | Self::Snowflake(_) => Ok(Sizes::new()),
         }
     }
 
@@ -1211,6 +1405,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.references(schema, relation),
             Self::Sqlite(connection) => connection.references(schema, relation),
             Self::DuckDb(connection) => connection.references(schema, relation),
+            Self::Turso(connection) => connection.references(schema, relation),
             // Nothing declares one document's field a reference to another's.
             Self::Snowflake(_) | Self::MongoDb(_) => Ok(Vec::new()),
         }
@@ -1224,7 +1419,9 @@ impl Connection {
             Self::MySql(connection) => connection.databases(),
             Self::SqlServer(connection) => connection.databases(),
             Self::MongoDb(connection) => connection.databases(),
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Snowflake(_) => Ok(Databases::default()),
+            Self::Sqlite(_) | Self::DuckDb(_) | Self::Turso(_) | Self::Snowflake(_) => {
+                Ok(Databases::default())
+            }
         }
     }
 
@@ -1235,6 +1432,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.structure(schema, relation),
             Self::Sqlite(connection) => connection.structure(schema, relation),
             Self::DuckDb(connection) => connection.structure(schema, relation),
+            Self::Turso(connection) => connection.structure(schema, relation),
             Self::Snowflake(connection) => connection.structure(schema, relation),
             Self::MongoDb(connection) => connection.structure(schema, relation),
         }
@@ -1251,6 +1449,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.ddl(schema, relation, kind),
             Self::Sqlite(connection) => connection.ddl(schema, relation),
             Self::DuckDb(connection) => connection.ddl(schema, relation),
+            Self::Turso(connection) => connection.ddl(schema, relation),
             Self::Snowflake(connection) => connection.ddl(schema, relation, kind),
             Self::MongoDb(connection) => connection.ddl(schema, relation),
         }
@@ -1277,12 +1476,21 @@ impl Connection {
     /// a query already returning gigabytes is past the point where stopping the
     /// server helps.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
+        if let Some(alongside) = cancel.stop_alongside()
+            && !matches!(self, Self::Snowflake(_) | Self::MongoDb(_))
+        {
+            return alongside
+                .iter()
+                .map(|connection| connection.cancel(&CancelToken::default()))
+                .fold(Ok(()), Result::and);
+        }
         match self {
             Self::Postgres(connection) => connection.cancel(),
             Self::MySql(connection) => connection.cancel(),
             Self::SqlServer(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
             Self::DuckDb(connection) => connection.cancel(),
+            Self::Turso(connection) => connection.cancel(),
             Self::Snowflake(connection) => connection.cancel(cancel),
             Self::MongoDb(connection) => connection.cancel(cancel),
         }
@@ -1301,6 +1509,7 @@ impl Connection {
             Self::SqlServer(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
+            | Self::Turso(_)
             | Self::Snowflake(_)
             | Self::MongoDb(_) => false,
         }
@@ -1321,13 +1530,15 @@ impl Connection {
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite(_) => Engine::Sqlite,
             Self::DuckDb(_) => Engine::DuckDb,
+            Self::Turso(_) => Engine::Turso,
             Self::Snowflake(_) => Engine::Snowflake,
             Self::MongoDb(_) => Engine::MongoDb,
         };
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
         };
-        self.query(statement, &CancelToken::default()).map(|_| ())
+        self.query(statement, &CancelToken::default(), Fetch::default())
+            .map(|_| ())
     }
 }
 
@@ -1409,6 +1620,156 @@ pub fn cell_type(name: &str) -> Option<&'static str> {
 /// A cell value, already formatted by the server. `None` is SQL NULL, which is
 /// distinct from an empty string and must stay distinguishable in the grid.
 pub type Cell = Option<String>;
+
+/// A row's cells, packed: every value's text in one buffer, and where each
+/// ends. A `Vec<Cell>` spends a 24-byte header and a heap block of its own on
+/// every cell, which on a wide table of small values outweighs the values --
+/// a million rows of 106 columns held 7.6 GB for 3.6 GB of text.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Row {
+    text: Box<str>,
+    /// Each cell's end in `text`, with [`NULL`] set for a NULL, whose end is
+    /// the one before it. One spelling per row, so derived equality is the
+    /// cells' equality.
+    ends: Box<[u32]>,
+}
+
+const NULL: u32 = 1 << 31;
+
+impl Row {
+    /// Fails past 2 GB of text in the row, which `ends` cannot address.
+    pub fn new<S: AsRef<str>>(cells: impl IntoIterator<Item = Option<S>>) -> Result<Self, DbError> {
+        let mut builder = RowBuilder::default();
+        for cell in cells {
+            builder.push(cell.as_ref().map(AsRef::as_ref));
+        }
+        builder.finish()
+    }
+
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    /// `None` for a NULL and for a column past the row's end alike.
+    pub fn get(&self, col: usize) -> Option<&str> {
+        let end = *self.ends.get(col)?;
+        if end & NULL != 0 {
+            return None;
+        }
+        let start = col
+            .checked_sub(1)
+            .map_or(0, |before| self.ends[before] & !NULL);
+        Some(&self.text[start as usize..end as usize])
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = Option<&str>> + '_ {
+        (0..self.len()).map(|col| self.get(col))
+    }
+
+    /// Bytes of cell text, a NULL counting none.
+    pub fn text_len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Put each `(column, value)` in place, the row rebuilt once however many
+    /// there are. A column past the row's end is skipped, and a row the edits
+    /// would take past 2 GB is left as it was.
+    pub fn replace(&mut self, edits: &[(usize, Option<&str>)]) {
+        let mut builder = RowBuilder::default();
+        for col in 0..self.len() {
+            let edit = edits.iter().rev().find(|(at, _)| *at == col);
+            builder.push(edit.map_or_else(|| self.get(col), |(_, value)| *value));
+        }
+        if let Ok(row) = builder.finish() {
+            *self = row;
+        }
+    }
+}
+
+impl std::fmt::Debug for Row {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl PartialEq<Vec<Cell>> for Row {
+    fn eq(&self, other: &Vec<Cell>) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a == b.as_deref())
+    }
+}
+
+impl TryFrom<Vec<Cell>> for Row {
+    type Error = DbError;
+
+    fn try_from(cells: Vec<Cell>) -> Result<Self, DbError> {
+        Self::new(cells)
+    }
+}
+
+/// Written as the list of cells it holds, so a snapshot reads the same as it
+/// did when rows were `Vec<Cell>`, to this build and to older ones.
+impl Serialize for Row {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for Row {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(Vec::<Cell>::deserialize(deserializer)?)
+            .map_err(|error| serde::de::Error::custom(error.message))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn rows(cells: Vec<Vec<Cell>>) -> Vec<Row> {
+    cells
+        .into_iter()
+        .map(|row| Row::try_from(row).unwrap())
+        .collect()
+}
+
+/// Packs rows from cells a driver already holds as text, one push at a time.
+/// Kept across rows: its buffers are reused, and each row is copied out at
+/// its exact size.
+#[derive(Default)]
+pub struct RowBuilder {
+    text: String,
+    ends: Vec<u32>,
+    overflowed: bool,
+}
+
+impl RowBuilder {
+    pub fn push(&mut self, cell: Option<&str>) {
+        let null = match cell {
+            Some(value) => {
+                self.text.push_str(value);
+                0
+            }
+            None => NULL,
+        };
+        match u32::try_from(self.text.len()) {
+            Ok(end) if end & NULL == 0 => self.ends.push(end | null),
+            _ => self.overflowed = true,
+        }
+    }
+
+    /// The row pushed since the last finish, and a fresh start either way.
+    pub fn finish(&mut self) -> Result<Row, DbError> {
+        let row = match std::mem::take(&mut self.overflowed) {
+            false => Ok(Row {
+                text: self.text.as_str().into(),
+                ends: self.ends.as_slice().into(),
+            }),
+            true => Err(plain_error(
+                "A row holds more than 2 GB of text, more than DBDelve can show.".into(),
+            )),
+        };
+        self.text.clear();
+        self.ends.clear();
+        row
+    }
+}
 
 /// Serialized because a restored tab has to know which kind it is before the
 /// catalog that would say so has loaded -- and a table is what a profile
@@ -1652,7 +2013,7 @@ pub struct Reference {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryResult {
     pub columns: Vec<Column>,
-    pub rows: Vec<Vec<Cell>>,
+    pub rows: Vec<Row>,
     /// Total bytes of returned cell text. Shown in the status bar so the cost
     /// of a wide or geometry-heavy result is visible rather than mysterious.
     pub bytes: usize,
@@ -1661,6 +2022,16 @@ pub struct QueryResult {
     /// zero both for commands that affected no rows and commands without a row
     /// count, so callers must not infer the command kind from this value.
     pub rows_affected: Option<u64>,
+    /// How many rows the statement returned, when the row limit kept fewer of
+    /// them than that. `None` when `rows` is the whole result.
+    pub capped_from: Option<usize>,
+    /// Set when the statement was stopped before it finished, so `rows` are
+    /// what had arrived by then and how many more there were is unknown.
+    pub stopped: Option<Stopped>,
+    /// What running the statement cost beyond its result, for the user to be
+    /// told beside it: SQL Server's session, reset by a Cancel that landed
+    /// after the statement had finished.
+    pub notice: Option<String>,
     /// Each cell's type, row by row, where a column's type is not every one of
     /// its cells': a MongoDB field holds whatever each document put there. The
     /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a
@@ -1683,6 +2054,284 @@ pub struct QueryResult {
     /// is split on the `GO`-separated batch instead, because a batch is a
     /// scope boundary, and one batch readily returns several.
     pub rest: Vec<QueryResult>,
+}
+
+/// Why a statement's rows end before the statement did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Stopped {
+    /// It reached the row limit and was safe to stop there.
+    AtLimit,
+    /// The user cancelled it part way.
+    Cancelled,
+}
+
+/// Whether `error` is the user's Cancel landing, in the words each engine's
+/// stop comes back in, rather than anything else that ended the statement while
+/// the cancel was on its way. A server answering in another language reads as
+/// not a cancel, which drops the rows instead of keeping them as a result.
+pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
+    let message = error.message.as_str();
+    match engine {
+        Engine::Postgres => message == "canceling statement due to user request",
+        Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
+        Engine::Sqlite => message == "interrupted",
+        Engine::Turso => message == turso::INTERRUPTED,
+        Engine::DuckDb => message.starts_with(duckdb::INTERRUPTED),
+        // The second is dbdelve's own, a cancel between partitions.
+        Engine::Snowflake => {
+            matches!(message, "SQL execution canceled" | "Cancelled.")
+                || message == tr("Cancelled.")
+        }
+        Engine::SqlServer => {
+            message.starts_with(mssql::CANCELLED) || message.starts_with(tr(mssql::CANCELLED))
+        }
+        Engine::MongoDb => message == "Cancelled." || message == tr("Cancelled."),
+    }
+}
+
+/// What a Cancel took beyond the statement it stopped, which the user has to
+/// be told even where the rows it had are kept: on SQL Server the error
+/// itself, which says the session was reset. Postgres cannot say whether a
+/// transaction was open, and a cancel aborts the one it lands in; SQLite rolls
+/// back the transaction an interrupted write was in. MySQL's `KILL QUERY` and
+/// SQLite's interrupt of a read undo only the statement, and Snowflake has no
+/// session to lose.
+pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<String> {
+    match engine {
+        Engine::SqlServer => Some(error.message.clone()),
+        Engine::Postgres => Some(
+            "A cancel aborts the transaction it lands in: if one was open, it refuses every \
+             statement until a ROLLBACK."
+                .into(),
+        ),
+        Engine::Sqlite if !reads => Some(
+            "If the statement was inside a transaction, SQLite rolled the whole transaction \
+             back."
+                .into(),
+        ),
+        Engine::Turso if !reads => Some(
+            "If the statement was inside a transaction, Turso will not commit it: the COMMIT \
+             fails and the transaction is rolled back."
+                .into(),
+        ),
+        Engine::DuckDb if !reads => Some(
+            tr("If the statement was inside a transaction, DuckDB aborted it: it refuses every statement until a ROLLBACK.")
+                .into(),
+        ),
+        Engine::Sqlite
+        | Engine::DuckDb
+        | Engine::Turso
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Snowflake
+        | Engine::MongoDb => None,
+    }
+}
+
+/// How a user statement's rows are taken: how many are kept, where they go as
+/// they arrive, and whether the statement may be stopped once there are
+/// enough of them.
+#[derive(Clone, Copy, Default)]
+pub struct Fetch<'a> {
+    pub limit: Option<usize>,
+    pub feed: Option<&'a Feed>,
+    /// The submission is one statement that only reads, as `sql::stoppable`
+    /// judges it, so stopping it at the limit loses nothing it was going to
+    /// do.
+    pub reads_only: bool,
+    /// Asked once the statement holds its connection, before anything is
+    /// sent: `false` drops it unsent. For a statement queued behind another
+    /// on a connection it shares ([`Connection::query_alongside`]'s fallback),
+    /// so a Cancel before then drops it rather than stopping the other.
+    pub held: Option<&'a dyn Fn() -> bool>,
+}
+
+impl Fetch<'_> {
+    /// [`Fetch::held`], as the error an engine returns before sending.
+    fn hold(&self) -> Result<(), DbError> {
+        match self.held.is_none_or(|held| held()) {
+            true => Ok(()),
+            false => Err(plain_error(tr("Cancelled before it was sent.").into())),
+        }
+    }
+}
+
+/// Rows handed over while a statement is still running, so the first of a
+/// large result is on screen long before the last arrives. The driver pushes
+/// and the grid takes; a row sits here only between the two.
+#[derive(Clone, Default)]
+pub struct Feed(Arc<Mutex<Fed>>);
+
+/// What a [`Feed`] holds since it was last taken from.
+#[derive(Default)]
+pub struct Fed {
+    /// Counts result sets. A taker whose rows came from an earlier set than
+    /// this one has rows of a statement the submission has moved past.
+    pub set: usize,
+    pub columns: Vec<Column>,
+    pub rows: Vec<Row>,
+    /// The first set's column types, once a describe on another connection
+    /// has said, so rows can be shown by type before the statement is done.
+    /// Empty until then.
+    types: Vec<String>,
+    /// Until when the first set's rows are held back for that describe, so
+    /// they are first shown by type rather than restyled under the user's
+    /// eye. Cleared once it has answered, or the statement is over.
+    awaiting: Option<std::time::Instant>,
+    /// When the current set's kept rows reached the limit. Whatever the run
+    /// does after that is not fetching rows anyone will see.
+    pub filled: Option<std::time::Instant>,
+}
+
+impl Feed {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Fed> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn begin(&self, columns: Vec<Column>) {
+        let mut fed = self.lock();
+        fed.set += 1;
+        fed.columns = columns;
+        fed.rows.clear();
+        fed.filled = None;
+    }
+
+    pub(crate) fn push(&self, row: Row) {
+        self.lock().rows.push(row);
+    }
+
+    /// The rows since the last take, under the set's columns, typed once the
+    /// types are known. Positional, and only where the counts agree: the
+    /// describe ran apart from the statement, and a type against the wrong
+    /// column is worse than none.
+    pub fn take(&self) -> Fed {
+        let mut fed = self.lock();
+        if fed.set == 1
+            && fed
+                .awaiting
+                .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            return Fed::default();
+        }
+        let mut columns = fed.columns.clone();
+        if fed.set == 1 && fed.types.len() == columns.len() {
+            for (column, data_type) in columns.iter_mut().zip(&fed.types) {
+                column.data_type = Some(data_type.clone());
+            }
+        }
+        Fed {
+            set: fed.set,
+            columns,
+            rows: std::mem::take(&mut fed.rows),
+            types: Vec::new(),
+            awaiting: None,
+            filled: fed.filled,
+        }
+    }
+
+    /// Types learned from a row rather than the description before it.
+    pub(crate) fn retype(&self, columns: Vec<Column>) {
+        self.lock().columns = columns;
+    }
+
+    pub(crate) fn fill(&self) {
+        self.lock().filled = Some(std::time::Instant::now());
+    }
+
+    /// Hold the first set's rows until [`Feed::describe`] or `until`.
+    pub(crate) fn await_types(&self, until: std::time::Instant) {
+        self.lock().awaiting = Some(until);
+    }
+
+    /// The describe's answer, empty when it learned nothing. Rows held for it
+    /// have their geometry rendered here, off the frame thread, as the
+    /// driver renders every row after them.
+    pub(crate) fn describe(&self, types: Vec<String>) {
+        let mut fed = self.lock();
+        fed.awaiting = None;
+        if fed.set == 1 && types.len() == fed.columns.len() {
+            let spatial: Vec<bool> = types
+                .iter()
+                .map(|name| postgres::is_spatial(name))
+                .collect();
+            if spatial.contains(&true) {
+                for row in &mut fed.rows {
+                    postgres::format_spatial_row(row, &spatial);
+                }
+            }
+        }
+        fed.types = types;
+    }
+
+    /// Let held rows go: the statement is over, and the rows are its result.
+    pub(crate) fn release(&self) {
+        self.lock().awaiting = None;
+    }
+
+    /// `None` until [`Feed::describe`] has been told.
+    pub(crate) fn types(&self) -> Option<Vec<String>> {
+        let fed = self.lock();
+        (!fed.types.is_empty()).then(|| fed.types.clone())
+    }
+}
+
+/// The cells of `result` still waiting to be rendered by their column's type,
+/// as `(row, column, value)`: a fed result's rows can arrive before the types
+/// they are rendered by. Copied out so [`render`] can work on them off the
+/// frame thread.
+pub fn unrendered(engine: Engine, result: &QueryResult) -> Vec<(usize, usize, String)> {
+    if engine != Engine::Postgres {
+        return Vec::new();
+    }
+    let spatial: Vec<usize> = result
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| {
+            column
+                .data_type
+                .as_deref()
+                .is_some_and(postgres::is_spatial)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if spatial.is_empty() {
+        return Vec::new();
+    }
+    result
+        .rows
+        .iter()
+        .enumerate()
+        .flat_map(|(row, cells)| {
+            spatial.iter().filter_map(move |&column| {
+                let value = cells.get(column)?;
+                // EWKB opens with its byte-order flag, `00` or `01`, which no
+                // WKT keyword does: a cheap test before a copy of the value.
+                (value.starts_with("00") || value.starts_with("01"))
+                    .then(|| (row, column, value.to_string()))
+            })
+        })
+        .collect()
+}
+
+/// What [`unrendered`] found, rendered: the value it was, and what it reads as.
+pub fn render(cells: Vec<(usize, usize, String)>) -> Vec<(usize, usize, String, String)> {
+    cells
+        .into_iter()
+        .filter_map(|(row, column, value)| {
+            let rendered = postgres::render_spatial(&value)?;
+            Some((row, column, value, rendered))
+        })
+        .collect()
+}
+
+impl QueryResult {
+    /// The rows the statement returned, held or not.
+    pub fn total_rows(&self) -> usize {
+        self.capped_from.unwrap_or(self.rows.len())
+    }
 }
 
 /// The table a result set's rows can be written back to, already resolved to
@@ -1981,7 +2630,7 @@ pub(super) fn assemble_databases(result: &QueryResult) -> Result<Databases, DbEr
 
 pub(super) fn required_cell<'a>(
     result: &'a QueryResult,
-    row: &'a [Cell],
+    row: &'a Row,
     column_name: &str,
 ) -> Result<&'a str, DbError> {
     let index = result
@@ -1991,24 +2640,19 @@ pub(super) fn required_cell<'a>(
         .ok_or_else(|| plain_error(trf!("Catalog query omitted column {}.", column_name)))?;
 
     row.get(index)
-        .and_then(Option::as_deref)
         .ok_or_else(|| plain_error(trf!("Catalog query returned no {}.", column_name)))
 }
 
 /// A catalog column an engine may have nothing to say about. A missing column
 /// and a null read the same, so an engine without the concept says so by not
 /// selecting it rather than by coalescing a placeholder.
-fn optional_cell<'a>(
-    result: &'a QueryResult,
-    row: &'a [Cell],
-    column_name: &str,
-) -> Option<&'a str> {
+fn optional_cell<'a>(result: &'a QueryResult, row: &'a Row, column_name: &str) -> Option<&'a str> {
     let index = result
         .columns
         .iter()
         .position(|column| column.name == column_name)?;
 
-    row.get(index)?.as_deref().filter(|value| !value.is_empty())
+    row.get(index).filter(|value| !value.is_empty())
 }
 
 pub(super) fn unexpected_catalog_value(label: &str, value: &str) -> DbError {
@@ -2057,6 +2701,7 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
         // An open database has no session switch; read-only is a way to open
         // the file, which a profile does not ask for yet.
         (Engine::DuckDb, _) => None,
+        (Engine::Turso, _) => None,
         // There is no session to set anything on.
         (Engine::Snowflake, _) => None,
         // No session-level switch exists. `ApplicationIntent=ReadOnly` routes a
@@ -2082,15 +2727,229 @@ pub(super) fn result(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult 
             .collect(),
         rows: rows
             .iter()
-            .map(|row| row.iter().map(|cell| cell.map(str::to_string)).collect())
+            .map(|row| Row::new(row.iter().copied()).unwrap())
             .collect(),
         ..Default::default()
+    }
+}
+
+/// The live checks every engine's `live_` tests make of a queue run at once,
+/// shared because they are one claim about [`Connection::query_alongside`]:
+/// the `Workspace` around it needs a window, and these need a server.
+#[cfg(test)]
+pub(super) mod at_once {
+    use std::time::{Duration, Instant};
+
+    use super::{CancelToken, Connection, DbError, Engine, Fetch, QueryResult, is_cancel};
+    use crate::{session::runs_at_once, sql::Mode};
+
+    /// Each statement on a connection of its own, all at once, as
+    /// `Workspace::run_at_once` sends a queue: how long the lot took, and each
+    /// one's outcome in order.
+    pub(in crate::db) fn run(
+        connection: &Connection,
+        statements: &[&str],
+        cancel: &CancelToken,
+    ) -> (Duration, Vec<Result<QueryResult, DbError>>) {
+        let started = Instant::now();
+        let outcomes = std::thread::scope(|scope| {
+            let running: Vec<_> = statements
+                .iter()
+                .map(|sql| {
+                    scope.spawn(|| connection.query_alongside(sql, cancel, Fetch::default(), false))
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|thread| {
+                    thread
+                        .join()
+                        .expect("the statement's thread should not panic")
+                })
+                .collect()
+        });
+        (started.elapsed(), outcomes)
+    }
+
+    /// Two slow reads run at once take about the time of one: well under what
+    /// they take one after the other on the profile's connection. A queue
+    /// with a write in it is not run at once at all.
+    pub(in crate::db) fn reads_overlap(
+        connection: &Connection,
+        engine: Engine,
+        slow: &str,
+        write: &str,
+    ) {
+        let pair = [slow, slow];
+        assert!(runs_at_once(engine, Mode::ReadWrite, &pair));
+        assert!(!runs_at_once(engine, Mode::Full, &[slow, write]));
+
+        let started = Instant::now();
+        for sql in pair {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .expect("the read should run");
+        }
+        let in_turn = started.elapsed();
+        let (at_once, outcomes) = run(connection, &pair, &CancelToken::alongside());
+        for outcome in outcomes {
+            outcome.expect("the read should run at once with the other");
+        }
+        eprintln!("{engine:?}: two reads in turn {in_turn:?}, at once {at_once:?}");
+        assert!(
+            at_once.as_secs_f64() < in_turn.as_secs_f64() * 0.8,
+            "at once {at_once:?} against {in_turn:?} in turn"
+        );
+    }
+
+    /// Wait for `count` statements under `cancel` to hold a connection of
+    /// their own, and a moment more for them to reach the server. A fixed
+    /// wait loses to a slow connect, and the cancel then lands before
+    /// anything was sent.
+    fn connected(cancel: &CancelToken, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline
+            && cancel.0.lock().map_or(0, |running| {
+                running
+                    .alongside
+                    .as_ref()
+                    .map_or(0, |alongside| alongside.iter().flatten().count())
+            }) < count
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    /// A cancel under the run's token stops every statement running at once,
+    /// each on its own connection, and leaves the profile's connection be.
+    pub(in crate::db) fn a_cancel_stops_them_all(
+        connection: &Connection,
+        engine: Engine,
+        runaway: &str,
+    ) {
+        let cancel = CancelToken::alongside();
+        let (elapsed, outcomes) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                connected(&cancel, 2);
+                connection
+                    .cancel(&cancel)
+                    .expect("the cancel should reach each connection");
+            });
+            run(connection, &[runaway, runaway], &cancel)
+        });
+        eprintln!("{engine:?}: two runaways cancelled after {elapsed:?}");
+        for outcome in outcomes {
+            let error = outcome.expect_err("the statement should have been stopped");
+            assert!(is_cancel(engine, &error), "{}", error.message);
+        }
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        connection
+            .query("SELECT 1", &CancelToken::default(), Fetch::default())
+            .expect("the profile's own connection should be untouched");
+    }
+
+    /// A cancel under one statement's own token stops that statement alone:
+    /// the one beside it, under a token of its own, runs to its end, as a
+    /// Cancel on one chip of a queue run at once leaves the others.
+    pub(in crate::db) fn a_cancel_stops_only_its_own(
+        connection: &Connection,
+        engine: Engine,
+        runaway: &str,
+        slow: &str,
+    ) {
+        let (theirs, mine) = (CancelToken::alongside(), CancelToken::alongside());
+        let (stopped, finished) = std::thread::scope(|scope| {
+            let stopped = scope
+                .spawn(|| connection.query_alongside(runaway, &theirs, Fetch::default(), false));
+            let finished =
+                scope.spawn(|| connection.query_alongside(slow, &mine, Fetch::default(), false));
+            connected(&theirs, 1);
+            connected(&mine, 1);
+            connection
+                .cancel(&theirs)
+                .expect("the cancel should reach its connection");
+            let join = |thread: std::thread::ScopedJoinHandle<'_, _>| {
+                thread
+                    .join()
+                    .expect("the statement's thread should not panic")
+            };
+            (join(stopped), join(finished))
+        });
+        let error = stopped.expect_err("the statement cancelled should have been stopped");
+        assert!(is_cancel(engine, &error), "{}", error.message);
+        finished.expect("the statement beside it should run to its end");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_packed_row_holds_what_its_cells_did() {
+        let cells: Vec<Cell> = vec![
+            Some("1".into()),
+            None,
+            Some(String::new()),
+            Some("ü".into()),
+        ];
+        let mut row = Row::try_from(cells.clone()).unwrap();
+        assert_eq!(row, cells);
+        assert_eq!(row.get(1), None, "NULL");
+        assert_eq!(row.get(2), Some(""), "an empty string, not NULL");
+        assert_eq!(row.get(4), None, "past the end");
+        assert_eq!(row.text_len(), 3);
+
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            serde_json::to_string(&cells).unwrap(),
+            "a snapshot reads as it did",
+        );
+        assert_eq!(
+            serde_json::from_str::<Row>(r#"["1",null,"","ü"]"#).unwrap(),
+            row
+        );
+
+        row.replace(&[(0, None), (1, Some("two")), (9, Some("x"))]);
+        let edited = vec![
+            None,
+            Some("two".into()),
+            Some(String::new()),
+            Some("ü".into()),
+        ];
+        assert_eq!(row, edited);
+        assert_eq!(row, Row::try_from(edited).unwrap(), "one spelling per row");
+    }
+
+    #[test]
+    fn only_the_cancel_itself_reads_as_a_cancel() {
+        let error = |message: &str| DbError {
+            message: message.into(),
+            position: None,
+        };
+        let reset = format!("{} The connection was reset.", mssql::CANCELLED);
+        for (engine, words) in [
+            (Engine::Postgres, "canceling statement due to user request"),
+            (Engine::MySql, "Query execution was interrupted"),
+            (Engine::MariaDb, "Query execution was interrupted"),
+            (Engine::Sqlite, "interrupted"),
+            (Engine::Snowflake, "SQL execution canceled"),
+            (Engine::SqlServer, reset.as_str()),
+        ] {
+            assert!(is_cancel(engine, &error(words)), "{engine:?}");
+            assert!(!is_cancel(engine, &error("division by zero")), "{engine:?}");
+        }
+        // The statement had finished: a whole result, not a cancelled one.
+        assert!(!is_cancel(
+            Engine::SqlServer,
+            &error("The statement finished, but Cancel arrived after that.")
+        ));
+        assert!(!is_cancel(
+            Engine::MariaDb,
+            &error("Query execution was interrupted (max_statement_time exceeded)")
+        ));
+    }
 
     #[test]
     fn every_buffer_is_highlighted_by_a_grammar_the_editor_was_built_with() {

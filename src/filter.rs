@@ -185,7 +185,7 @@ impl Operator {
     /// a syntax error until an application registers the function (spec §7).
     /// SQL Server has none before 2025. MongoDB has `$regex`.
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
+        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::Turso | Engine::SqlServer)
     }
 
     /// How the operator is written to disk. A name rather than an index, so
@@ -378,6 +378,7 @@ pub(crate) fn derived_filter(
                 | Engine::MariaDb
                 | Engine::Sqlite
                 | Engine::DuckDb
+                | Engine::Turso
                 | Engine::Snowflake
                 | Engine::SqlServer => {
                     format!("({left}) {} ({predicate})", bar.conjunction.as_str())
@@ -408,6 +409,7 @@ pub(crate) fn bar_predicate(
             | Engine::MariaDb
             | Engine::Sqlite
             | Engine::DuckDb
+            | Engine::Turso
             | Engine::Snowflake
             | Engine::SqlServer => value.to_string(),
         });
@@ -462,6 +464,7 @@ pub(crate) fn filter_predicate(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::DuckDb
+        | Engine::Turso
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -529,7 +532,7 @@ pub(crate) fn filter_predicate(
             // anywhere in the value.
             Engine::MariaDb => Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value))),
             // SQL Server has no regex before 2025's `REGEXP_LIKE`.
-            Engine::Sqlite | Engine::SqlServer => None,
+            Engine::Sqlite | Engine::Turso | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
@@ -565,7 +568,7 @@ pub(crate) fn substring(
     value: &str,
 ) -> String {
     let literal = engine.quote_literal(value);
-    if engine == Engine::Sqlite {
+    if matches!(engine, Engine::Sqlite | Engine::Turso) {
         return match operator {
             Operator::NotContains => format!("instr({name}, {literal}) = 0"),
             Operator::StartsWith => format!("instr({name}, {literal}) = 1"),
@@ -740,7 +743,7 @@ pub(crate) fn relation_sql(
     relation: &str,
     filter: &str,
     sort: &[SortKey],
-    limit: usize,
+    limit: Option<usize>,
     offset: usize,
 ) -> String {
     let preview = preview_sql(engine, schema, relation, filter, limit, offset);
@@ -766,6 +769,7 @@ pub(crate) fn sort_expression(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::DuckDb
+        | Engine::Turso
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -1145,7 +1149,7 @@ mod tests {
             "t",
             &sql("hash", Operator::Equals, "0x00FF"),
             &[],
-            10,
+            Some(10),
             0,
         );
         assert!(
@@ -1228,7 +1232,8 @@ mod tests {
             r#""state" IS NOT NULL"#,
             r#""state" <> ''"#,
         ] {
-            let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, 100, 0);
+            let sql =
+                explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, Some(100), 0);
             println!(
                 "{} {filter}",
                 sql::is_generated_select(Engine::Postgres, &sql)
@@ -1249,7 +1254,8 @@ mod tests {
                     _ => "ok",
                 };
                 let filter = predicate(engine, operator, value).expect("applied");
-                let sql = explorer::preview_sql(engine, "public", "accounts", &filter, 100, 0);
+                let sql =
+                    explorer::preview_sql(engine, "public", "accounts", &filter, Some(100), 0);
                 assert!(
                     sql::is_generated_select(engine, &sql),
                     "{} was refused: {sql}",
@@ -1353,7 +1359,7 @@ mod tests {
                 &key.referenced_schema,
                 &key.referenced_table,
                 &filter,
-                100,
+                Some(100),
                 0,
             );
             assert!(sql::is_generated_select(engine, &sql), "{sql} was refused");
@@ -1369,7 +1375,14 @@ mod tests {
             followed(Engine::Postgres, &key, Some("1'; DROP TABLE accounts --")).expect("a value");
         assert_eq!(filter, r#""id" = '1''; DROP TABLE accounts --'"#);
 
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was refused"
@@ -1505,7 +1518,14 @@ mod tests {
             ],
         );
         assert_eq!(filter, r#"(("a" = '1') OR (id > 5)) AND ("c" = '3')"#);
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was refused"
@@ -1524,7 +1544,14 @@ mod tests {
                 ..FilterBar::default()
             }],
         );
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             !sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was admitted"
@@ -1841,7 +1868,15 @@ mod tests {
     #[test]
     fn a_preview_asks_for_the_rows_its_tab_was_set_to() {
         assert_eq!(
-            relation_sql(Engine::Postgres, "public", "accounts", "", &[], 100, 0),
+            relation_sql(
+                Engine::Postgres,
+                "public",
+                "accounts",
+                "",
+                &[],
+                Some(100),
+                0
+            ),
             r#"SELECT * FROM "public"."accounts" LIMIT 100"#
         );
         // A raised limit still keeps the sort ahead of it, or the rows would be
@@ -1853,7 +1888,7 @@ mod tests {
                 "accounts",
                 "",
                 &[SortKey::new(r#""id""#, true)],
-                100_000,
+                Some(100_000),
                 0
             ),
             r#"SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 100000"#
@@ -1872,7 +1907,7 @@ mod tests {
             "accounts",
             "",
             &[SortKey::new(r#""id""#, true)],
-            100,
+            Some(100),
             200,
         );
 
@@ -1896,7 +1931,7 @@ mod tests {
             "accounts",
             r#""state" = 'ok'"#,
             &[SortKey::new(r#""id""#, true)],
-            100,
+            Some(100),
             200,
         );
 
@@ -1920,7 +1955,7 @@ mod tests {
             "accounts",
             "",
             &[SortKey::new(r#""id""#, false)],
-            PREVIEW_ROW_LIMIT,
+            Some(PREVIEW_ROW_LIMIT),
             0,
         );
 
@@ -1956,7 +1991,7 @@ mod tests {
                 "accounts",
                 &predicate,
                 &[SortKey::new(engine.quote_identifier("id"), true)],
-                100,
+                Some(100),
                 200,
             );
             assert!(

@@ -1252,6 +1252,9 @@ impl Workspace {
                         // refusal (Task 6), which has no statement to show.
                         .children(sql.map(|sql| {
                             div()
+                                .id("pending-run-sql")
+                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                .overflow_y_scroll()
                                 .p(px(layout::SPACE_SM))
                                 .rounded(px(layout::RADIUS_CONTROL))
                                 .bg(t.surface)
@@ -1375,6 +1378,9 @@ impl Workspace {
                         .child(section_label(t, tr("Run stopped")))
                         .child(
                             div()
+                                .id("queue-failure-message")
+                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                .overflow_y_scroll()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(message),
@@ -1490,6 +1496,9 @@ impl Workspace {
                                 }))
                                 .child(
                                     div()
+                                        .id("stale-edit-sql")
+                                        .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                        .overflow_y_scroll()
                                         .p(px(layout::SPACE_SM))
                                         .rounded(px(layout::RADIUS_CONTROL))
                                         .bg(t.surface)
@@ -1618,7 +1627,7 @@ impl Workspace {
                         .child(
                             div()
                                 .id("apply-review-sql")
-                                .max_h(px(220.))
+                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
                                 .overflow_y_scroll()
                                 .smooth_scroll(&smooth_scoped("apply-review-sql", &scope, cx))
                                 .font_family(code)
@@ -1629,6 +1638,9 @@ impl Workspace {
                         )
                         .children(error.map(|message| {
                             div()
+                                .id("apply-review-error")
+                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                .overflow_y_scroll()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.danger)
                                 .child(message)

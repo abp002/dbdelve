@@ -53,16 +53,16 @@ use gpui_component::{
 
 use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
-    CopyCell, CopyResults, CopyRow, CopyRows, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
-    FindInResults, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
-    ImportConnections, NewConnection, NewProject, NewQuery, NewRow, NextEdit, NextPage,
-    NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious, PreviousEdit,
-    PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
-    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
-    SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetFilterColumn, SetFilterOperator,
-    SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowAllColumns, ShowEditor, ShowReferences,
-    SortColumn, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowPanel, ToggleSidebar,
-    ZoomEditorIn, ZoomEditorOut,
+    CopyCell, CopyResults, CopyRow, CopyRows, CustomRowLimit, DeleteRow, DiscardEdits, EditCell,
+    ExplainQuery, FindInResults, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
+    ImportConnections, LimitTarget, NewConnection, NewProject, NewQuery, NewRow, NextEdit,
+    NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious,
+    PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection,
+    RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery,
+    SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
+    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
+    ShowAllColumns, ShowEditor, ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin,
+    ToggleNextJoin, TogglePinColumn, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -91,7 +91,8 @@ use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, theme};
 use ui::{
     Control, Tone, button, button_label, dialog, group_thousands, human_bytes, icon_button,
-    object_icon, relative_age, row_icon, row_icon_tinted, row_readout, section_label, titlebar,
+    object_icon, one_line, relative_age, row_icon, row_icon_tinted, row_readout, section_label,
+    titlebar,
 };
 use workspace::Workspace;
 
@@ -252,6 +253,7 @@ fn main() {
             // theme is applied through them, and `apply_to_components` reads the
             // global rather than naming a family itself.
             cx.set_global(Fonts::default());
+            theme::user::load();
             let theme = Theme::default();
             theme.apply_to_components(cx);
             cx.set_global(theme);

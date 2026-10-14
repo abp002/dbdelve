@@ -1,6 +1,6 @@
 [package]
 name = "dbdelve"
-version = "0.3.2"
+version = "0.3.7"
 edition = "2024"
 license = "MIT"
 description = "A native SQL client"
@@ -45,10 +45,18 @@ tree-sitter-javascript = "=0.23.1"
 # implement and the types we hand it are the same crate rather than two copies.
 lsp-types = "=0.97.0"
 
-# Blocking client, deliberately. GPUI's executor is async-task over Grand
-# Central Dispatch with no reactor, so a tokio future panics on it. This owns
-# its runtime and runs on the background executor. See AGENTS.md.
-postgres = "0.19"
+# The table's arrow-key actions, which gpui-component binds but keeps in a
+# private module, so the grid can step them from its own active cell. A crate
+# already in the graph, pinned to the version gpui-component resolves so the
+# actions caught are the ones its keymap dispatches.
+gpui-base = "=0.6.4"
+
+# Async, driven the way SQL Server's tiberius is below: each connection owns a
+# tokio current-thread runtime and blocks on it from the background executor,
+# so no tokio future reaches GPUI's. Directly rather than through the blocking
+# `postgres` crate, whose `simple_query` collects every row before returning
+# one, which leaves nothing to stop at a row limit. See AGENTS.md.
+tokio-postgres = "0.7"
 
 # SQLite. Blocking like the Postgres driver, and for the same reason.
 #
@@ -74,6 +82,9 @@ duckdb = { version = "=1.10506.0", features = ["bundled", "parquet", "json", "vt
 # extension is not one libduckdb-sys can link in, and a download at run time is
 # not something a database client should need to open a file.
 calamine = { version = "=0.36.1", features = ["dates"] }
+
+turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }
+turso_core = "=0.8.2"
 
 # MySQL. Blocking, and with no tokio anywhere in its tree -- rust-mysql-simple
 # is the sibling of the blocking `postgres` client, not of `mysql_async`.
@@ -221,6 +232,10 @@ sys-locale = "=0.3.2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# VS Code theme files are JSONC: comments and trailing commas, which serde_json
+# refuses. dprint's parser, straight into a serde_json `Value`; its `serde`
+# feature adds only serde, already in the graph.
+jsonc-parser = { version = "=0.34.0", features = ["serde"] }
 toml = "0.9"
 url = "2"
 

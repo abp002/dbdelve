@@ -38,7 +38,7 @@ pub(crate) struct Settings {
     pub(crate) chrome_font_size: f32,
     pub(crate) editor_font_size: f32,
     pub(crate) grid_font_size: f32,
-    pub(crate) preview_rows: usize,
+    pub(crate) row_limit: Option<usize>,
     /// How much of the window the desktop shows through, for themes with no
     /// entry in `theme_opacity`. Nothing writes it any more; it is what a
     /// single shared value from before per-theme opacity restores as.
@@ -80,7 +80,7 @@ impl Default for Settings {
             chrome_font_size: layout::BODY_FONT_SIZE,
             editor_font_size: EDITOR_FONT_SIZE_DEFAULT,
             grid_font_size: layout::BODY_FONT_SIZE,
-            preview_rows: PREVIEW_ROW_LIMIT,
+            row_limit: Some(PREVIEW_ROW_LIMIT),
             opacity: theme::OPACITY_DEFAULT,
             theme_opacity: HashMap::new(),
             check_for_updates: true,
@@ -159,6 +159,10 @@ pub(crate) struct Workspace {
     /// The project that field renames; `None` while it names a new one.
     pub(crate) renaming_project: Option<String>,
     pub(crate) project_name_needs_focus: bool,
+    /// The field a row-limit menu turned into after Custom…, and whose limit
+    /// it sets. One at a time: it closes the moment it loses focus.
+    pub(crate) custom_limit: Option<(LimitTarget, Entity<InputState>)>,
+    pub(crate) custom_limit_needs_focus: bool,
     /// The project whose delete button has been clicked once and is waiting
     /// for the second.
     pub(crate) pending_project_deletion: Option<String>,
@@ -261,6 +265,24 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let row_panel_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Filter columns and values…")
+                .clean_on_escape()
+        });
+        cx.subscribe(
+            &row_panel_search,
+            |workspace, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value();
+                    if let Some((_, filter)) = workspace.active_row_panel() {
+                        *filter = value;
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let opacity_input = cx.new(|cx| InputState::new(window, cx));
         // With the window, because committing reinstalls the theme. Enter and
         // blur both count as done: a percentage is short enough that clicking
@@ -289,6 +311,8 @@ impl Workspace {
             project_name: None,
             renaming_project: None,
             project_name_needs_focus: false,
+            custom_limit: None,
+            custom_limit_needs_focus: false,
             pending_project_deletion: None,
             expanded_groups: Vec::new(),
             assigning_project: None,
@@ -309,6 +333,8 @@ impl Workspace {
             row_panel: views::RowPanel {
                 on_screen: Default::default(),
                 copied: None,
+                search: row_panel_search,
+                searched: Default::default(),
             },
             plan_copied: false,
             pending_removal: None,
@@ -378,14 +404,7 @@ impl Workspace {
                             .and_then(|stored| stored.editor_font_size)
                     }),
                 );
-                // A hand-edited value outside the choices the controls offer
-                // is unreachable by the controls that set it, and leaves no
-                // chip highlighted either -- so it is rejected rather than
-                // clamped.
-                workspace.settings.preview_rows = stored_settings
-                    .preview_rows
-                    .filter(|rows| explorer::ROW_LIMITS.contains(rows))
-                    .unwrap_or(PREVIEW_ROW_LIMIT);
+                workspace.settings.row_limit = stored_settings.row_limit();
                 workspace.settings.check_for_updates =
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
@@ -772,11 +791,11 @@ impl Workspace {
     /// reason the zoom is, and deliberately not applied to the tabs already
     /// open: their row count is a property of those rows, and changing a
     /// default must never re-run a query nobody asked to re-run.
-    pub(crate) fn set_preview_rows(&mut self, rows: usize, cx: &mut Context<Self>) {
-        if self.settings.preview_rows == rows {
+    pub(crate) fn set_default_row_limit(&mut self, rows: Option<usize>, cx: &mut Context<Self>) {
+        if self.settings.row_limit == rows {
             return;
         }
-        self.settings.preview_rows = rows;
+        self.settings.row_limit = rows;
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -809,7 +828,7 @@ impl Workspace {
     }
 
     /// The sorting a new tab starts with. Not applied to the tabs already
-    /// open, for the reason `set_preview_rows` is not: each holds its own.
+    /// open, for the reason `set_default_row_limit` is not: each holds its own.
     pub(crate) fn set_client_sort(&mut self, client: bool, cx: &mut Context<Self>) {
         if self.settings.client_sort == client {
             return;
@@ -904,6 +923,7 @@ impl Render for Workspace {
         let t = *theme(cx);
         self.settle_sidebar(window, cx);
         self.row_panel.on_screen.set(false);
+        self.row_panel.searched.set(false);
         // Every way the switcher closes ends here, so this is the one place
         // its name field is put away -- before the focus handoff below. The
         // welcome surface has the field too, and keeps it while in front.
@@ -918,6 +938,7 @@ impl Render for Workspace {
         // grid cannot be built without a window.
         self.restore_objects(window, cx);
         self.sync_page_input(window, cx);
+        self.sync_row_panel_filter(window, cx);
         // Where a query tab that reached the front without `activate_tab` gets
         // its snapshot read. `session.active` is written in three places --
         // `Session::new`, `activate_tab` and `escape` -- and the first and last
@@ -1004,6 +1025,11 @@ impl Render for Workspace {
             && std::mem::take(&mut self.welcome_needs_focus)
         {
             self.focus.focus(window, cx);
+        }
+        if std::mem::take(&mut self.custom_limit_needs_focus)
+            && let Some((_, input)) = &self.custom_limit
+        {
+            input.focus_handle(cx).focus(window, cx);
         }
         if std::mem::take(&mut self.project_name_needs_focus)
             && let Some(input) = &self.project_name
@@ -1111,7 +1137,8 @@ impl Render for Workspace {
                     _ => profile.config.endpoint(),
                 }
             }
-            ProfileState::Failed(message) => message.clone(),
+            // Postgres puts its DETAIL and HINT on lines of their own.
+            ProfileState::Failed(message) => one_line(message),
         };
 
         // The rows the grid actually holds, which is fewer than the result had
@@ -1120,6 +1147,10 @@ impl Render for Workspace {
             .session
             .active_results()
             .map(|results| results.read(cx).delegate().result().rows.len());
+        let stopped = profile
+            .session
+            .active_results()
+            .and_then(|results| results.read(cx).delegate().result().stopped);
         let column_count = profile
             .session
             .active_results()
@@ -1141,7 +1172,22 @@ impl Render for Workspace {
                     .as_deref()
                     .is_some_and(|sql| sql::rerunnable(profile.config.engine(), sql))
             });
-        let paging = views::render_paging(profile, cx);
+        // A query tab's own slot rather than the result in front: a queue run
+        // in turn can be showing a statement that finished while the next one
+        // runs. Run at once, the slot only holds the run open, and each
+        // statement streams into its own entry, so the one in front is read.
+        let running = match profile.session.active_query_tab() {
+            Some(tab) if tab.queue.as_ref().is_some_and(|queue| queue.at_once()) => {
+                let (state, results) = tab.shown();
+                views::render_running(state, Some(results), cx)
+            }
+            Some(tab) => views::render_running(&tab.query, Some(&tab.results), cx),
+            None => profile.session.active_query().and_then(|query| {
+                views::render_running(query, profile.session.active_results(), cx)
+            }),
+        };
+        let paging =
+            running.or_else(|| views::render_paging(profile, self.custom_limit.as_ref(), cx));
         let view_sorting = views::render_view_sorting(profile, cx);
         let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
@@ -1168,8 +1214,11 @@ impl Render for Workspace {
                 }
                 _ => None,
             };
-            let whole =
-                offset == 0 && matches!(query, QueryState::Complete { rows, .. } if *rows < limit);
+            let whole = offset == 0
+                && matches!(
+                    query,
+                    QueryState::Complete { rows, .. } if limit.is_none_or(|limit| *rows < limit)
+                );
             session::relation_rows(count, filter, estimate, engine.exact_row_estimates(), whole)
         });
         // The way to an exact number, which is never run unasked. Its tooltip
@@ -1233,9 +1282,14 @@ impl Render for Workspace {
             }) => {
                 // The rows on screen, unless the relation's own count or
                 // estimate is beside the stats already.
-                let count = relation_rows
-                    .is_none()
-                    .then(|| row_readout(showing.unwrap_or(*rows), *rows));
+                let count = relation_rows.is_none().then(|| {
+                    let count = row_readout(showing.unwrap_or(*rows), *rows);
+                    match stopped {
+                        Some(db::Stopped::Cancelled) => format!("{count}, cancelled"),
+                        Some(db::Stopped::AtLimit) => format!("{count}, stopped at limit"),
+                        None => count,
+                    }
+                });
                 let joined = |rest: String| match count {
                     Some(count) => format!("{count} \u{b7} {rest}"),
                     None => rest,
@@ -1385,7 +1439,7 @@ impl Render for Workspace {
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .text_color(t.text_muted)
-                                .child(notice)
+                                .child(one_line(&notice))
                         })),
                 )
                 // Between two sides that share the free space equally, so
@@ -1585,10 +1639,22 @@ impl Render for Workspace {
                 &self.row_panel,
                 self.plan_copied,
                 &self.tab_strip,
+                self.custom_limit.as_ref(),
                 cx,
             )))
             .children(self.render_find_bar(cx))
             .children(results_status);
+        // Only now, with the frame built, is it known whether the panel's
+        // field went away -- folded, closed, or emptied by a run -- and the
+        // handoff above has already run, so it lands on the next frame.
+        if !self.row_panel.searched.get()
+            && self.row_panel.search.focus_handle(cx).is_focused(window)
+        {
+            cx.defer_in(window, |workspace, _, cx| {
+                workspace.refocus_front();
+                cx.notify();
+            });
+        }
         // The strip's chips glide for as long as the render above found one
         // still on its way.
         self.tab_strip.shift.drive(window);
@@ -1647,6 +1713,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_query))
             .on_action(cx.listener(Self::explain_query))
             .on_action(cx.listener(Self::format_query))
+            .on_action(cx.listener(Self::toggle_comment))
             .on_action(cx.listener(Self::choose_mode))
             .on_action(cx.listener(Self::reset_confirmations))
             .on_action(cx.listener(Self::cancel_query))
@@ -1656,6 +1723,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_edit))
             .on_action(cx.listener(Self::sort_column))
             .on_action(cx.listener(Self::set_row_limit))
+            .on_action(cx.listener(Self::set_query_limit))
+            .on_action(cx.listener(Self::set_default_row_limit_action))
+            .on_action(cx.listener(Self::custom_row_limit))
             .on_action(cx.listener(Self::refresh_active_relation))
             .on_action(cx.listener(Self::refresh_connection))
             .on_action(cx.listener(Self::next_page))
@@ -1825,6 +1895,21 @@ pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 /// chrome stops at 17 because the titlebar does not grow with it: the window
 /// buttons are placed against it once, when the window opens, and past 17 the
 /// controls in it would touch its edges.
+/// Blocking work on a thread of its own, for the background executor to await
+/// without holding one of its threads: on Linux it has only as many as there
+/// are cores, and a run parked on the server for each of them would stall
+/// everything else spawned there, a Cancel included.
+pub(crate) async fn on_own_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || sender.send(work()));
+    // Dropped unsent only by a panic on that thread, which is a panic here.
+    receiver
+        .await
+        .expect("the thread running blocking work panicked")
+}
+
 pub(crate) fn font_size_range(slot: FontSlot) -> (f32, f32, f32) {
     match slot {
         FontSlot::Chrome => (11.0, layout::BODY_FONT_SIZE, 17.0),
@@ -1978,7 +2063,9 @@ mod tests {
 
     #[test]
     fn opacity_is_stored_per_theme() {
-        let [first, second, ..] = Theme::all();
+        let [first, second, ..] = Theme::all()[..] else {
+            unreachable!()
+        };
         let mut settings = Settings::default();
         settings.set_opacity_for(&first, 0.9);
         assert_eq!(settings.opacity_for(&first), 0.9);

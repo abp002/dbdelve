@@ -20,6 +20,9 @@
 //! The window is vibrant, so every plane is also a glass: see [`Theme::frost`].
 
 pub mod color;
+pub mod user;
+mod vscode;
+mod zed;
 
 use gpui::{App, Window};
 
@@ -110,6 +113,9 @@ pub mod layout {
     pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
     pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
     pub const DIALOG_WIDTH: f32 = 420.0;
+    /// A statement or an error shown on a modal, capped so a long one scrolls
+    /// inside the card instead of pushing its buttons off the window.
+    pub const DIALOG_TEXT_MAX_HEIGHT: f32 = 220.0;
     /// The palette. Wide enough for a schema-qualified name and its kind, and
     /// capped so a catalog of thousands scrolls rather than filling the window.
     pub const PALETTE_WIDTH: f32 = 520.0;
@@ -570,9 +576,17 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Every theme dbdelve ships, in the order the theme picker lists them:
-    /// every dark theme, then every light one. The first is the default.
-    pub fn all() -> [Self; 29] {
+    /// Every theme in the order the theme picker lists them: the built-in
+    /// ones, then the user's own and the imported.
+    pub fn all() -> Vec<Self> {
+        let mut all = Self::built_in().to_vec();
+        all.extend(user::themes());
+        all
+    }
+
+    /// Every theme dbdelve ships: every dark theme, then every light one. The
+    /// first is the default.
+    fn built_in() -> [Self; 29] {
         [
             Self::glass(),
             Self::black(),
@@ -745,6 +759,13 @@ impl Theme {
         component.colors.danger_foreground = self.on_accent.into();
         component.colors.danger_hover = self.element_hover.flatten(self.danger).into();
         component.colors.danger_active = self.element_active.flatten(self.danger).into();
+        // Same split as `button_primary`: left unset, a `Button::danger()` is
+        // the library's pale tint with `on_accent` ink, unreadable on either
+        // polarity.
+        component.colors.button_danger = component.colors.danger;
+        component.colors.button_danger_foreground = component.colors.danger_foreground;
+        component.colors.button_danger_hover = component.colors.danger_hover;
+        component.colors.button_danger_active = component.colors.danger_active;
         component.colors.success = self.success.into();
         component.colors.success_foreground = self.on_accent.into();
         component.colors.success_hover = self.element_hover.flatten(self.success).into();
@@ -1720,6 +1741,7 @@ mod tests {
             check(t, "danger on panel", t.danger, t.panel, AA_TEXT);
             check(t, "success on surface", t.success, t.surface, AA_LARGE);
             check(t, "on_accent over accent", t.on_accent, t.accent, AA_LARGE);
+            check(t, "on_accent over danger", t.on_accent, t.danger, AA_LARGE);
             // Button labels are body-size UI text on the control tone.
             check(t, "text on control", t.text, t.control, AA_TEXT);
             // A changed cell is still a cell in the dense grid: the wash marks
@@ -1830,7 +1852,10 @@ mod tests {
     fn themes_are_comparable_not_mirrored() {
         // Every theme should land in the same contrast neighbourhood, so
         // switching does not make one of them feel washed out next to another.
-        let ratios = Theme::all().map(|theme| contrast_ratio(theme.text, theme.bg));
+        let ratios: Vec<_> = Theme::all()
+            .iter()
+            .map(|theme| contrast_ratio(theme.text, theme.bg))
+            .collect();
         let spread = ratios.iter().cloned().fold(f32::MIN, f32::max)
             - ratios.iter().cloned().fold(f32::MAX, f32::min);
         assert!(spread < 6.0, "themes drifted apart: {ratios:?}");
@@ -1970,9 +1995,9 @@ mod tests {
     fn glass_is_toned_onto_the_glass_planes() {
         let planes = |t: Theme| [t.bg, t.panel, t.surface, t.overlay, t.control];
         let all = Theme::all();
-        for glass in all.into_iter().filter(|t| t.is_glass) {
-            let base = all
-                .into_iter()
+        for &glass in all.iter().filter(|t| t.is_glass) {
+            let base = *all
+                .iter()
                 .find(|t| Some(t.name) == glass.name.strip_suffix(" Glass"))
                 .unwrap_or_else(|| panic!("{}: no base theme", glass.name));
             let tones = match glass.appearance {

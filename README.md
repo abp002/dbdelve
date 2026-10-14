@@ -1,8 +1,8 @@
-# DBDelve
+# <img src="assets/icon/dbdelve.svg" alt="" width="48" align="absmiddle"> DBDelve
 
 A fast, native, cross-platform, multi-engine database client. Written in Rust
 with GPUI, with no Electron and no JVM, so it starts quickly, uses little memory
-and keeps scrolling smoothly through a million-row table.
+and keeps scrolling smoothly through large tables at which other clients crash or introduce limits.
 
 > Early days. Everything listed below works today.
 
@@ -17,6 +17,25 @@ https://github.com/user-attachments/assets/ee555c10-4a18-4059-b451-bfadfc9f9ae0
 ## Why
 
 I wanted something which is performant, modern and consumes little ram. The existing DB clients are either filled with bloat (Electron and JVM) or paid. This is an alternative to them. No feature is ever going behind a paywall and with time we will have complete parity on features with those too. 
+
+## Benchmarks
+
+DBDelve 0.3.6 against DBeaver 25.3.1 on the same Postgres table, median of 5
+runs each (2026-10-11, M1 Pro, 32 GB):
+
+| | DBDelve | DBeaver |
+|---|---|---|
+| Launch | 1.1 s | 5.2 s |
+| Idle memory | 133 MB | 606 MB |
+| 1,000-row query | 0.21 s | 1.96 s |
+| 1M rows, time | 56 s | 208 s |
+| 1M rows, memory\* | 4.9 GB | 17 GB |
+
+\* Not a normal use case: this is the whole 1M-row table pulled into memory on
+purpose, with the row limit turned off, and that result is itself 4 GB of data.
+DBeaver needed its heap raised to 16 GB to finish it at all.
+
+How these were measured, and the full results, are in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Supported databases
 
@@ -41,7 +60,8 @@ time.
 - **Make it yours.** A theme library with DBDelve's own Dark, Light and Black,
   the first two also in translucent glass, alongside favorites like Catppuccin,
   Tokyo Night, Gruvbox and Dracula, each in dark and light, and each of those
-  in glass.
+  in glass. Import themes from Zed or VS Code, or write your own; see
+  [docs/themes.md](docs/themes.md).
 - **Bring your connections with you.** Import every saved connection,
   passwords and SSH settings included, from DBeaver on macOS, Linux and
   Windows, or from TablePlus on macOS.
@@ -195,7 +215,6 @@ status bar links to [the latest release][releases] once there is a newer one.
 There is no telemetry. The only request DBDelve makes on its own is one to
 GitHub at startup to check for updates, which you can turn off in Settings.
 
-
 ## License
 
-MIT. See [NOTICES.md](NOTICES.md) for third-party font licenses.
+MIT. See [NOTICES.md](NOTICES.md) for third-party font and theme licenses.

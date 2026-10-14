@@ -31,8 +31,8 @@ use crate::{
         NextProfile, NextTab, OpenSettings, PaletteNext, PalettePrevious, PreviousEdit,
         PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
         ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
-        SetNull, ShowEditor, ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn,
-        ZoomEditorOut,
+        SetNull, ShowEditor, ToggleComment, ToggleNextJoin, ToggleRowPanel, ToggleSidebar,
+        ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     import::Source,
@@ -126,7 +126,7 @@ registry! {
     ("previous_tab", "Previous Tab", None, ["ctrl-shift-tab"], PreviousTab),
     ("next_profile", "Next Connection", None, ["ctrl-`"], NextProfile),
     ("previous_profile", "Previous Connection", None, ["ctrl-shift-`"], PreviousProfile),
-    ("show_editor", "Back / Dismiss", None, ["escape"], ShowEditor),
+    ("show_editor", "Dismiss", None, ["escape"], ShowEditor),
     // Still keyed by the id of the cycle this replaced, so an override saved
     // against it keeps working.
     ("cycle_theme", "Select Theme", None, ["secondary-k t"], SelectTheme),
@@ -149,6 +149,7 @@ registry! {
     // gesture anyway, and it collides with nothing on any platform.
     ("set_null", "Set Cell to NULL", Some("DataTable"), ["secondary-backspace"], SetNull),
     ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
+    ("toggle_comment", "Toggle Line Comment", Some("Editor > Input"), ["secondary-/"], ToggleComment),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),
     ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
     ("quit", "Quit dbdelve", None, ["secondary-q"], Quit),

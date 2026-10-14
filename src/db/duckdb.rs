@@ -26,15 +26,19 @@ use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
 use duckdb::{Config, InterruptHandle};
 
 use super::{
-    Catalog, Cell, Column, DbError, Engine, QueryResult, Reference, Structure, assemble_catalog,
-    assemble_foreign_keys, assemble_references, assemble_structure, home_expanded, plain_error,
-    required_cell,
+    Catalog, Column, DbError, Engine, Fetch, QueryResult, Reference, RowBuilder, Stopped,
+    Structure, assemble_catalog, assemble_foreign_keys, assemble_references, assemble_structure,
+    plain_error, required_cell,
 };
 use crate::i18n::{tr, trf};
 
 /// What an empty path means: a database held in memory, gone when the
 /// connection closes. The files it reads stay where they are.
 pub const IN_MEMORY: &str = ":memory:";
+
+/// How an interrupted statement's error begins, whether Cancel or the
+/// statement timeout interrupted it.
+pub(super) const INTERRUPTED: &str = "INTERRUPT Error";
 
 /// The path out of a `duckdb:` URL, the way `sqlite.rs` reads its own: all of
 /// it after the scheme, less an optional `//`. Nothing after the scheme is a
@@ -58,9 +62,14 @@ pub struct Connection {
 
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
-        let path = home_expanded(path.trim());
+        let path = match path.trim() {
+            "" | IN_MEMORY => IN_MEMORY.to_string(),
+            path => crate::store::home_expanded(path)
+                .to_string_lossy()
+                .into_owned(),
+        };
         let connection = match path.as_str() {
-            "" | IN_MEMORY => duckdb::Connection::open_in_memory(),
+            IN_MEMORY => duckdb::Connection::open_in_memory(),
             path => {
                 // Not created when missing, for the reason `sqlite.rs` gives:
                 // a mistyped path would open as an empty database and read as
@@ -77,12 +86,32 @@ impl Connection {
             .register_table_function::<super::xlsx::ReadXlsx>("read_xlsx")
             .map_err(|error| plain_error(error.to_string()))?;
 
-        Ok(Self {
+        Ok(Self::wrap(
+            connection,
+            (statement_timeout > 0).then(|| Duration::from_secs(u64::from(statement_timeout))),
+        ))
+    }
+
+    fn wrap(connection: duckdb::Connection, statement_timeout: Option<Duration>) -> Self {
+        Self {
             interrupt: connection.interrupt_handle(),
-            statement_timeout: (statement_timeout > 0)
-                .then(|| Duration::from_secs(u64::from(statement_timeout))),
+            statement_timeout,
             connection: Arc::new(Mutex::new(connection)),
-        })
+        }
+    }
+
+    /// A second connection to the same database, in memory included: DuckDB
+    /// hands out connections to one open instance, so what this one sees is
+    /// what the first one committed, and `read_xlsx` is already registered on
+    /// it.
+    pub fn alongside(&self) -> Result<Self, DbError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| unavailable())?
+            .try_clone()
+            .map_err(|error| plain_error(error.to_string()))?;
+        Ok(Self::wrap(connection, self.statement_timeout))
     }
 
     /// Local and immediate, as SQLite's is: an interrupt on an idle connection
@@ -112,12 +141,14 @@ impl Connection {
     /// run whole as a batch, which reports no rows -- the editor's own
     /// statement splitting already sends a selection one statement at a time,
     /// so this is the path of a script, not of a query.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
+    ///
+    /// Past `fetch.limit` a read is interrupted when stopping it loses
+    /// nothing (`fetch.reads_only`), and drained otherwise, its extra rows
+    /// counted and dropped.
+    pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
         let _deadline = self.deadline();
-        let connection = self.connection.lock().map_err(|_| DbError {
-            message: tr("The connection is unavailable after an earlier internal failure.").into(),
-            position: None,
-        })?;
+        let connection = self.connection.lock().map_err(|_| unavailable())?;
+        fetch.hold()?;
         let started = Instant::now();
 
         let mut statement = match connection.prepare(sql) {
@@ -142,11 +173,16 @@ impl Connection {
                 data_type: Some(type_name(field.data_type())),
             })
             .collect();
+        if let Some(feed) = fetch.feed {
+            feed.begin(columns.clone());
+        }
 
         let options = FormatOptions::default().with_null("");
-        let mut rows = Vec::new();
-        let mut bytes = 0;
-        for batch in batches {
+        let mut result = QueryResult::default();
+        let mut builder = RowBuilder::default();
+        let (mut returned, mut kept) = (0usize, 0usize);
+        let mut filled = None;
+        'batches: for batch in batches {
             let formatters = batch
                 .columns()
                 .iter()
@@ -154,33 +190,53 @@ impl Connection {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| plain_error(error.to_string()))?;
             for row in 0..batch.num_rows() {
-                let cells: Vec<Cell> = batch
-                    .columns()
-                    .iter()
-                    .zip(&formatters)
-                    .map(|(array, formatter)| {
-                        (!array.is_null(row)).then(|| formatter.value(row).to_string())
-                    })
-                    .collect();
-                bytes += cells.iter().flatten().map(String::len).sum::<usize>();
-                rows.push(cells);
+                returned += 1;
+                if fetch.limit.is_some_and(|limit| kept >= limit) {
+                    if fetch.reads_only {
+                        result.stopped = Some(Stopped::AtLimit);
+                        break 'batches;
+                    }
+                    continue;
+                }
+                kept += 1;
+                if fetch.limit == Some(kept) {
+                    filled = Some(started.elapsed());
+                    if let Some(feed) = fetch.feed {
+                        feed.fill();
+                    }
+                }
+                for (array, formatter) in batch.columns().iter().zip(&formatters) {
+                    let value = (!array.is_null(row)).then(|| formatter.value(row).to_string());
+                    builder.push(value.as_deref());
+                }
+                let cells = builder.finish()?;
+                result.bytes += cells.text_len();
+                match fetch.feed {
+                    Some(feed) => feed.push(cells),
+                    None => result.rows.push(cells),
+                }
             }
         }
 
-        Ok(QueryResult {
-            rows_affected: Some(rows.len() as u64),
-            columns,
-            rows,
-            bytes,
-            elapsed: started.elapsed(),
-            ..QueryResult::default()
-        })
+        result.rows_affected = Some(returned as u64);
+        result.capped_from = (result.stopped.is_none() && returned > kept).then_some(returned);
+        result.columns = columns;
+        result.elapsed = match filled {
+            Some(filled) if returned > kept => filled,
+            _ => started.elapsed(),
+        };
+        Ok(result)
+    }
+
+    /// A statement of dbdelve's own, read whole.
+    fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
+        self.query(sql, Fetch::default())
     }
 
     /// The tables and views of the database the connection opened, less the
     /// catalogs DuckDB keeps for itself.
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.query(
+        let relations = self.internal_query(
             "SELECT schema_name, table_name AS relation_name, 'table' AS relation_kind,
                     estimated_size AS row_estimate
              FROM duckdb_tables()
@@ -205,7 +261,7 @@ impl Connection {
             Engine::DuckDb.quote_literal(schema),
             Engine::DuckDb.quote_literal(relation),
         );
-        let columns = self.query(&format!(
+        let columns = self.internal_query(&format!(
             "SELECT column_name, lower(data_type) AS data_type,
                     CASE WHEN is_nullable THEN 'yes' ELSE 'no' END AS nullable,
                     COALESCE(column_default, '') AS column_default
@@ -214,7 +270,7 @@ impl Connection {
                AND schema_name = {schema_literal} AND table_name = {relation_literal}
              ORDER BY column_index"
         ))?;
-        let indexes = self.query(&format!(
+        let indexes = self.internal_query(&format!(
             "SELECT index_name AS object_name, COALESCE(sql, '') AS definition
              FROM duckdb_indexes()
              WHERE database_name = current_database()
@@ -225,7 +281,7 @@ impl Connection {
         // `constraint_text`, which spells a key `PRIMARY KEY(id)`: the
         // Structure view and `Structure::primary_key` read the shape every
         // other engine gives them, `PRIMARY KEY (id)`.
-        let constraints = self.query(&format!(
+        let constraints = self.internal_query(&format!(
             "SELECT constraint_type || ' (' || array_to_string(constraint_column_names, ', ') || ')'
                         AS object_name,
                     constraint_type || ' (' || array_to_string(constraint_column_names, ', ') || ')'
@@ -241,7 +297,7 @@ impl Connection {
              ORDER BY constraint_index"
         ))?;
         let mut structure = assemble_structure(columns, indexes, constraints)?;
-        structure.foreign_keys = assemble_foreign_keys(&self.query(&format!(
+        structure.foreign_keys = assemble_foreign_keys(&self.internal_query(&format!(
             "SELECT unnest(constraint_column_names) AS column_name,
                     schema_name AS referenced_schema,
                     referenced_table,
@@ -257,7 +313,7 @@ impl Connection {
     /// Who points at this relation. A DuckDB foreign key names its parent by
     /// table alone, in its own schema.
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
-        let result = self.query(&format!(
+        let result = self.internal_query(&format!(
             "SELECT schema_name AS source_schema, table_name AS source_table,
                     unnest(constraint_column_names) AS column_name,
                     unnest(referenced_column_names) AS referenced_column,
@@ -277,7 +333,7 @@ impl Connection {
             Engine::DuckDb.quote_literal(schema),
             Engine::DuckDb.quote_literal(relation),
         );
-        let listed = self.query(&format!(
+        let listed = self.internal_query(&format!(
             "SELECT sql FROM duckdb_tables()
              WHERE database_name = current_database()
                AND schema_name = {schema_literal} AND table_name = {relation_literal}
@@ -348,6 +404,13 @@ fn type_name(data_type: &DataType) -> String {
     }
 }
 
+fn unavailable() -> DbError {
+    DbError {
+        message: tr("The connection is unavailable after an earlier internal failure.").into(),
+        position: None,
+    }
+}
+
 /// DuckDB's message as it wrote it. It carries no offset into the statement
 /// that `DbError::position` could point the editor at; its `LINE 1:` excerpt
 /// already shows where.
@@ -361,6 +424,7 @@ fn query_error(error: duckdb::Error) -> DbError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Row;
 
     /// The fixtures beside the other engines' seeds, by absolute path: a
     /// relative one would resolve against wherever the test runner stands.
@@ -375,20 +439,20 @@ mod tests {
     #[test]
     fn a_csv_file_is_a_table_away() {
         let result = memory()
-            .query(&format!(
+            .internal_query(&format!(
                 "SELECT nombre FROM read_csv('{}') WHERE ciudad = 'Londres'",
                 fixture("clientes.csv")
             ))
             .unwrap();
         assert_eq!(result.columns[0].name, "nombre");
-        assert_eq!(result.rows, vec![vec![Some("Ada Lovelace".to_string())]]);
+        assert_eq!(result.rows, vec![Row::new([Some("Ada Lovelace")]).unwrap()]);
     }
 
     #[test]
     fn a_spreadsheet_reads_by_its_header_with_numbers_as_numbers() {
         let connection = memory();
         let result = connection
-            .query(&format!(
+            .internal_query(&format!(
                 "SELECT * FROM read_xlsx('{}')",
                 fixture("facturas.xlsx")
             ))
@@ -397,28 +461,28 @@ mod tests {
         assert_eq!(names, ["numero", "cliente", "importe", "fecha", "pagada"]);
         assert_eq!(result.columns[2].data_type.as_deref(), Some("double"));
         assert_eq!(result.rows.len(), 3);
-        assert_eq!(result.rows[0][2].as_deref(), Some("1250.5"));
-        assert_eq!(result.rows[0][3].as_deref(), Some("2026-01-03"));
-        assert_eq!(result.rows[2][2], None);
+        assert_eq!(result.rows[0].get(2), Some("1250.5"));
+        assert_eq!(result.rows[0].get(3), Some("2026-01-03"));
+        assert_eq!(result.rows[2].get(2), None);
 
         let february = connection
-            .query(&format!(
+            .internal_query(&format!(
                 "SELECT numero FROM read_xlsx('{}', sheet := 'Febrero')",
                 fixture("facturas.xlsx")
             ))
             .unwrap();
-        assert_eq!(february.rows, vec![vec![Some("F-010".to_string())]]);
+        assert_eq!(february.rows, vec![Row::new([Some("F-010")]).unwrap()]);
     }
 
     #[test]
     fn nested_and_exact_types_render_as_duckdb_prints_them() {
         let result = memory()
-            .query("SELECT [1, 2] AS list, 12.50::DECIMAL(5,2) AS money, NULL AS nothing")
+            .internal_query("SELECT [1, 2] AS list, 12.50::DECIMAL(5,2) AS money, NULL AS nothing")
             .unwrap();
         assert_eq!(result.columns[1].data_type.as_deref(), Some("decimal(5,2)"));
         assert_eq!(
             result.rows[0],
-            vec![Some("[1, 2]".into()), Some("12.50".into()), None]
+            Row::new([Some("[1, 2]"), Some("12.50"), None]).unwrap()
         );
     }
 
@@ -426,7 +490,7 @@ mod tests {
     fn the_catalog_and_a_tables_structure_read_back() {
         let connection = memory();
         connection
-            .query(
+            .internal_query(
                 "CREATE TABLE clientes (id INTEGER PRIMARY KEY, nombre VARCHAR NOT NULL);
                  CREATE TABLE facturas (id INTEGER PRIMARY KEY,
                                         cliente INTEGER REFERENCES clientes(id));",
@@ -443,5 +507,59 @@ mod tests {
         assert_eq!(structure.foreign_keys[0].referenced_table, "clientes");
         let references = connection.references("main", "clientes").unwrap();
         assert_eq!(references[0].table, "facturas");
+    }
+
+    #[test]
+    fn a_read_past_the_row_limit_stops_and_a_write_is_drained() {
+        let connection = memory();
+        let limited = |reads_only| {
+            connection
+                .query(
+                    "SELECT * FROM range(5000)",
+                    Fetch {
+                        limit: Some(3),
+                        reads_only,
+                        ..Fetch::default()
+                    },
+                )
+                .unwrap()
+        };
+        let stopped = limited(true);
+        assert_eq!(stopped.rows.len(), 3);
+        assert_eq!(stopped.stopped, Some(Stopped::AtLimit));
+        let drained = limited(false);
+        assert_eq!(drained.rows.len(), 3);
+        assert_eq!(drained.capped_from, Some(5000));
+        assert_eq!(drained.stopped, None);
+    }
+
+    #[test]
+    fn a_connection_alongside_sees_the_same_database_in_memory() {
+        let connection = memory();
+        connection
+            .internal_query("CREATE TABLE t AS SELECT 7 AS a")
+            .unwrap();
+        let beside = connection.alongside().unwrap();
+        let result = beside.internal_query("SELECT a FROM t").unwrap();
+        assert_eq!(result.rows[0].get(0), Some("7"));
+    }
+
+    #[test]
+    fn a_cancelled_statement_reads_as_a_cancel() {
+        let connection = memory();
+        let interrupt = connection.interrupt.clone();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            interrupt.interrupt();
+        });
+        let error = connection
+            .internal_query("SELECT count(*) FROM range(10000000000) a, range(1000) b")
+            .unwrap_err();
+        stopper.join().unwrap();
+        assert!(
+            crate::db::is_cancel(Engine::DuckDb, &error),
+            "{}",
+            error.message
+        );
     }
 }

@@ -20,7 +20,6 @@
 use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -42,9 +41,9 @@ use tokio::sync::oneshot;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, MISSING,
-    NamedDefinition, QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode,
-    Statistics, Structure, plain_error,
+    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, MISSING,
+    NamedDefinition, QueryResult, Relation, RelationKind, Row, Schema, ServerConfig, Sizes,
+    SslMode, Statistics, Stopped, Structure, plain_error,
 };
 use crate::i18n::{tr, trf};
 use crate::mql::{self, Arg, Call, CursorMethod, DbMethod, Method, Show, Target, Value};
@@ -342,7 +341,12 @@ fn tls(server: &ServerConfig) -> Tls {
         ),
         SslMode::VerifyCa | SslMode::VerifyFull => Tls::Enabled(
             TlsOptions::builder()
-                .ca_file_path(server.root_certificate.as_deref().map(PathBuf::from))
+                .ca_file_path(
+                    server
+                        .root_certificate
+                        .as_deref()
+                        .map(crate::store::home_expanded),
+                )
                 .build(),
         ),
     }
@@ -531,7 +535,16 @@ impl Connection {
     /// Run the statements in `text` in turn and keep the last one's result,
     /// as a Postgres submission of several keeps its last set. The run path
     /// sends one at a time; this is for a selection `mql` reads as more.
-    pub fn query(&self, text: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    ///
+    /// A cursor's documents are kept to `fetch`'s limit ([`read_cursor`]), and
+    /// none are fed: a later document can bring a field no earlier one had, so
+    /// the columns are not known until the last one is in.
+    pub fn query(
+        &self,
+        text: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
         let statements = mql::parse(text).map_err(|error| DbError {
             message: error.message,
             position: Some(error.at),
@@ -542,7 +555,7 @@ impl Connection {
             // Nothing brackets several statements, so a failure past the
             // first leaves the ones before it applied.
             result = Run::start(self, cancel)
-                .and_then(|run| self.statement(&statement.target, run))
+                .and_then(|run| self.statement(&statement.target, run, fetch))
                 .map_err(|error| match at {
                     0 => error,
                     1 => DbError {
@@ -565,7 +578,9 @@ impl Connection {
                     },
                 })?;
         }
-        result.elapsed = started.elapsed();
+        // A result cut at the limit holds how long the run went on past its
+        // last kept row, which is not the wait for the rows shown.
+        result.elapsed = started.elapsed().saturating_sub(result.elapsed);
         Ok(result)
     }
 
@@ -644,7 +659,7 @@ impl Connection {
         }
     }
 
-    fn statement(&self, target: &Target, run: Run) -> Result<QueryResult, DbError> {
+    fn statement(&self, target: &Target, run: Run, fetch: Fetch) -> Result<QueryResult, DbError> {
         match target {
             Target::Show(Show::Databases) => self.database_list(run),
             Target::Show(Show::Collections) => collection_names(run, &self.named(None)?),
@@ -656,7 +671,7 @@ impl Connection {
                 collection,
                 call,
                 cursor,
-            } => self.collection_call(run, database.as_deref(), collection, call, cursor),
+            } => self.collection_call(run, database.as_deref(), collection, call, cursor, fetch),
         }
     }
 
@@ -682,7 +697,7 @@ impl Connection {
             })
             .unwrap_or_default();
         databases.sort_by(|a, b| a.get_str("name").ok().cmp(&b.get_str("name").ok()));
-        Ok(documents(databases))
+        documents(databases)
     }
 
     fn database_call(
@@ -712,9 +727,7 @@ impl Connection {
                 // The user's command goes as written: no `maxTimeMS` is added,
                 // since the command is theirs to bound, and the client-side
                 // bound still holds.
-                Ok(reply(run.execute(|session| {
-                    target.run_command(sent).session(session)
-                })?))
+                reply(run.execute(|session| target.run_command(sent).session(session))?)
             }
             DbMethod::GetCollectionNames => collection_names(run, &self.named(database)?),
             DbMethod::Stats => {
@@ -728,7 +741,7 @@ impl Connection {
                         sent.insert("scale", scale);
                     }
                 }
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
             DbMethod::CreateCollection => {
                 let mut sent = doc! { "create": args.string(0)? };
@@ -757,7 +770,7 @@ impl Connection {
                         "writeConcern",
                     ],
                 )?;
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
             DbMethod::CreateView => {
                 let mut sent = doc! {
@@ -771,14 +784,14 @@ impl Connection {
                     args.document(3)?.unwrap_or_default(),
                     &["collation", "comment", "writeConcern"],
                 )?;
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
             DbMethod::DropDatabase => {
                 let mut sent = doc! { "dropDatabase": 1 };
                 if let Some(concern) = args.bson(0)? {
                     sent.insert("writeConcern", concern);
                 }
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
         }
     }
@@ -790,6 +803,7 @@ impl Connection {
         collection: &str,
         call: &Call<Method>,
         cursor: &[Call<CursorMethod>],
+        fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
         let elsewhere = database.is_some();
         let database = self.named(database)?;
@@ -835,7 +849,7 @@ impl Connection {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
                     None => {
                         let whole = !elsewhere && returns_whole_documents(&sent);
-                        let mut result = documents(fetch(run, &database, sent)?);
+                        let mut result = read_cursor(run, &database, sent, fetch)?.rows()?;
                         if whole {
                             result.edit = self.edit_target(collection, &result);
                         }
@@ -871,7 +885,7 @@ impl Connection {
                 )?;
                 match chained(&mut sent, cursor, false)? {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
-                    None => Ok(documents(fetch(run, &database, sent)?)),
+                    None => read_cursor(run, &database, sent, fetch)?.rows(),
                 }
             }
             // As the drivers count: a `$group` over the matching documents,
@@ -895,13 +909,13 @@ impl Connection {
                 if let Some(verbosity) = chained(&mut Document::new(), cursor, false)? {
                     return explained(run, &database, sent, verbosity);
                 }
-                let counted = fetch(run, &database, sent)?;
+                let counted = read_cursor(run, &database, sent, Fetch::default())?.documents;
                 let n = counted
                     .first()
                     .and_then(|counted| counted.get("n"))
                     .cloned()
                     .unwrap_or(Bson::Int32(0));
-                Ok(documents(vec![doc! { "count": n }]))
+                documents(vec![doc! { "count": n }])
             }
             Method::EstimatedDocumentCount => {
                 let mut sent = doc! { "count": collection };
@@ -913,7 +927,7 @@ impl Connection {
                 )?;
                 let counted = command(run, &database, sent)?;
                 let n = counted.get("n").cloned().unwrap_or(Bson::Null);
-                Ok(documents(vec![doc! { "count": n }]))
+                documents(vec![doc! { "count": n }])
             }
             Method::Distinct => {
                 let key = args.string(0)?;
@@ -934,18 +948,20 @@ impl Connection {
                     .get_array("values")
                     .cloned()
                     .unwrap_or_default();
-                Ok(documents(
+                documents(
                     values
                         .into_iter()
                         .map(|value| doc! { key.as_str(): value })
                         .collect(),
-                ))
+                )
             }
-            Method::GetIndexes => Ok(documents(fetch(
+            Method::GetIndexes => read_cursor(
                 run,
                 &database,
                 doc! { "listIndexes": collection },
-            )?)),
+                Fetch::default(),
+            )?
+            .rows(),
             Method::InsertOne | Method::InsertMany => {
                 let given = match call.method {
                     Method::InsertOne => vec![args.required_document(0)?],
@@ -976,7 +992,7 @@ impl Connection {
                     }
                     _ => doc! { "acknowledged": true, "insertedIds": ids },
                 };
-                Ok(affected(documents(vec![shown]), &written))
+                Ok(affected(documents(vec![shown])?, &written))
             }
             Method::UpdateOne | Method::UpdateMany | Method::ReplaceOne => {
                 let update = args.required(1)?;
@@ -1017,7 +1033,7 @@ impl Connection {
                     "modifiedCount": number(written.get("nModified")),
                     "upsertedId": upserted_id,
                 };
-                Ok(affected(documents(vec![shown]), &written))
+                Ok(affected(documents(vec![shown])?, &written))
             }
             Method::DeleteOne | Method::DeleteMany => {
                 let mut statement = doc! {
@@ -1041,7 +1057,7 @@ impl Connection {
                 sent.insert("deletes", vec![statement]);
                 let written = write(run, &database, sent)?;
                 let shown = doc! { "acknowledged": true, "deletedCount": number(written.get("n")) };
-                Ok(affected(documents(vec![shown]), &written))
+                Ok(affected(documents(vec![shown])?, &written))
             }
             Method::FindOneAndUpdate | Method::FindOneAndReplace | Method::FindOneAndDelete => {
                 let mut sent = doc! {
@@ -1107,7 +1123,7 @@ impl Connection {
                     Some(Bson::Document(found)) => vec![found.clone()],
                     _ => Vec::new(),
                 };
-                let mut result = documents(found);
+                let mut result = documents(found)?;
                 result.rows_affected = written
                     .get_document("lastErrorObject")
                     .ok()
@@ -1141,23 +1157,23 @@ impl Connection {
                     sent.insert("commitQuorum", quorum);
                 }
                 write(run, &database, sent)?;
-                Ok(documents(names))
+                documents(names)
             }
             Method::DropIndex => {
                 let index = args.required(0)?;
-                Ok(reply(command(
+                reply(command(
                     run,
                     &database,
                     doc! { "dropIndexes": collection, "index": index },
-                )?))
+                )?)
             }
             Method::DropIndexes => {
                 let index = args.bson(0)?.unwrap_or_else(|| "*".into());
-                Ok(reply(command(
+                reply(command(
                     run,
                     &database,
                     doc! { "dropIndexes": collection, "index": index },
-                )?))
+                )?)
             }
             Method::Drop => {
                 let mut sent = doc! { "drop": collection };
@@ -1167,7 +1183,7 @@ impl Connection {
                     args.document(0)?.unwrap_or_default(),
                     &["comment", "writeConcern"],
                 )?;
-                Ok(reply(command(run, &database, sent)?))
+                reply(command(run, &database, sent)?)
             }
             Method::RenameCollection => {
                 let name = database.name();
@@ -1179,7 +1195,7 @@ impl Connection {
                     sent.insert("dropTarget", drop_target);
                 }
                 let admin = self.client().database("admin");
-                Ok(reply(command(run, &admin, sent)?))
+                reply(command(run, &admin, sent)?)
             }
         }
     }
@@ -1856,19 +1872,97 @@ fn command(mut run: Run, database: &Database, sent: Document) -> Result<Document
     run.execute(|session| database.run_command(sent).session(session))
 }
 
-/// Every document a cursor command returns, through as many `getMore`s as it
-/// takes. Nothing is limited here: the statement's own `limit` is the only one
-/// (hard rule 1), and the whole result is held, as the SQL engines hold theirs.
-fn fetch(mut run: Run, database: &Database, sent: Document) -> Result<Vec<Document>, DbError> {
-    let sent = run.tagged(sent);
+/// A cursor command's documents, through as many `getMore`s as it takes, kept
+/// to `fetch`'s limit and counted past it. The statement's own `limit` is the
+/// only one sent (hard rule 1). A read is stopped at the first document past
+/// the limit instead: dropping its cursor kills it on the server, which undoes
+/// nothing.
+fn read_cursor(
+    mut run: Run,
+    database: &Database,
+    sent: Document,
+    fetch: Fetch,
+) -> Result<Fetched, DbError> {
+    let mut sent = run.tagged(sent);
     let comment = sent.get("comment").cloned();
+    let Fetch {
+        limit, reads_only, ..
+    } = fetch;
+    if let (Some(limit), true) = (limit, reads_only) {
+        sized_to(&mut sent, limit);
+    }
     run.execute(|session| async move {
         let mut action = database.run_cursor_command(sent).session(&mut *session);
         if let Some(comment) = comment {
             action = action.comment(comment);
         }
-        action.await?.stream(session).try_collect().await
+        let mut cursor = action.await?;
+        let mut stream = cursor.stream(session);
+        let mut fetched = Fetched::default();
+        while let Some(document) = stream.try_next().await? {
+            fetched.returned += 1;
+            if limit.is_some_and(|limit| fetched.documents.len() >= limit) {
+                if reads_only {
+                    fetched.stopped = true;
+                    break;
+                }
+                continue;
+            }
+            fetched.documents.push(document);
+            if limit == Some(fetched.documents.len()) {
+                fetched.filled = Some(Instant::now());
+            }
+        }
+        Ok(fetched)
     })
+}
+
+/// Asks a `find` or `aggregate` for one document past `limit` in its first
+/// batch, which is all a read stopped at the limit looks at: left to itself the
+/// server answers with a second batch of up to 16 MiB for the one document.
+/// A batch size the statement set is its own.
+fn sized_to(sent: &mut Document, limit: usize) {
+    const LARGEST_BATCH: usize = 10_000;
+    let size = i64::try_from(limit.saturating_add(1).min(LARGEST_BATCH)).unwrap_or_default();
+    if sent.contains_key("find") {
+        if !sent.contains_key("batchSize") {
+            sent.insert("batchSize", size);
+        }
+    } else if sent.contains_key("aggregate")
+        && let Ok(cursor) = sent.get_document_mut("cursor")
+        && !cursor.contains_key("batchSize")
+    {
+        cursor.insert("batchSize", size);
+    }
+}
+
+/// What [`read_cursor`] kept of a cursor's documents.
+#[derive(Default)]
+struct Fetched {
+    documents: Vec<Document>,
+    /// Every document the cursor returned, kept or not.
+    returned: usize,
+    /// When the kept documents reached the limit.
+    filled: Option<Instant>,
+    /// Ended at the first document past the limit, so how many more there
+    /// were is unknown.
+    stopped: bool,
+}
+
+impl Fetched {
+    /// The kept documents as rows. `elapsed` is how long the run went on past
+    /// the last kept one, for [`Connection::query`] to take off its clock.
+    fn rows(self) -> Result<QueryResult, DbError> {
+        let past = self.returned > self.documents.len();
+        let mut result = documents(self.documents)?;
+        result.rows_affected = Some(self.returned as u64);
+        result.capped_from = (past && !self.stopped).then_some(self.returned);
+        result.stopped = self.stopped.then_some(Stopped::AtLimit);
+        if past && let Some(filled) = self.filled {
+            result.elapsed = filled.elapsed();
+        }
+        Ok(result)
+    }
 }
 
 /// A write command's reply, or its first write error as the failure. The
@@ -1900,22 +1994,24 @@ fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbEr
 /// `show collections` and `getCollectionNames()`: every name, sorted, the
 /// server's own `system.*` included, since the statement asked the server.
 fn collection_names(run: Run, database: &Database) -> Result<QueryResult, DbError> {
-    let listed = fetch(
+    let listed = read_cursor(
         run,
         database,
         doc! { "listCollections": 1, "nameOnly": true, "authorizedCollections": true },
-    )?;
+        Fetch::default(),
+    )?
+    .documents;
     let mut names: Vec<&str> = listed
         .iter()
         .filter_map(|listed| listed.get_str("name").ok())
         .collect();
     names.sort_unstable();
-    Ok(documents(
+    documents(
         names
             .into_iter()
             .map(|name| doc! { "name": name })
             .collect(),
-    ))
+    )
 }
 
 /// The cursor methods chained after `find` or `aggregate`, as the fields of
@@ -2012,9 +2108,7 @@ fn explained(
             .into_iter()
             .map(|(field, value)| (field.to_string(), value)),
     );
-    Ok(reply(run.execute(|session| {
-        database.run_command(explain).session(session)
-    })?))
+    reply(run.execute(|session| database.run_command(explain).session(session))?)
 }
 
 /// mongosh refuses an update that would replace the document, and a
@@ -2088,7 +2182,7 @@ fn affected(mut result: QueryResult, written: &Document) -> QueryResult {
 }
 
 /// A reply as one row of its fields.
-fn reply(reply: Document) -> QueryResult {
+fn reply(reply: Document) -> Result<QueryResult, DbError> {
     documents(vec![reply])
 }
 
@@ -2272,7 +2366,7 @@ fn bson(value: &Value) -> Result<Bson, DbError> {
 /// Documents as rows. Every top-level field any of them has is a column, `_id`
 /// first and the rest in the order first seen; a document without the field
 /// leaves its cell [`MISSING`], which is not the null a document can hold.
-fn documents(documents: Vec<Document>) -> QueryResult {
+fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
     let mut names: Vec<&str> = Vec::new();
     let mut positions = HashMap::new();
     for document in &documents {
@@ -2299,7 +2393,8 @@ fn documents(documents: Vec<Document>) -> QueryResult {
             row[at] = cell(value);
             types[at] = type_alias(value);
         }
-        bytes += row.iter().flatten().map(String::len).sum::<usize>();
+        let row = Row::try_from(row)?;
+        bytes += row.text_len();
         rows.push(row);
         cell_types.push(types);
     }
@@ -2311,14 +2406,14 @@ fn documents(documents: Vec<Document>) -> QueryResult {
             data_type: Some(shared_type(cell_types.iter().map(|types| types[at])).into()),
         })
         .collect();
-    QueryResult {
+    Ok(QueryResult {
         columns,
         rows_affected: Some(rows.len() as u64),
         rows,
         cell_types,
         bytes,
         ..QueryResult::default()
-    }
+    })
 }
 
 /// A column's one type when its values agree, else `mixed`. A null or a
@@ -2821,7 +2916,7 @@ mod tests {
             assert_eq!(options.allow_invalid_certificates, None, "{mode:?}");
             assert_eq!(
                 options.ca_file_path,
-                Some(PathBuf::from("/etc/ssl/ca.pem")),
+                Some(std::path::PathBuf::from("/etc/ssl/ca.pem")),
                 "{mode:?}"
             );
         }
@@ -3104,7 +3199,8 @@ mod tests {
             doc! { "name": "Ada", "_id": 1, "email": "ada@example.test" },
             doc! { "_id": 2, "email": null, "seats": 3 },
             doc! { "_id": "three", "seats": 4.5 },
-        ]);
+        ])
+        .unwrap();
         let columns = result
             .columns
             .iter()
@@ -3122,13 +3218,13 @@ mod tests {
         );
         assert_eq!(
             result.rows[1],
-            [Some("2".into()), None, None, Some("3".into())]
+            vec![Some("2".into()), None, None, Some("3".into())]
         );
         // The two empty cells are not the same emptiness.
         assert_eq!(result.cell_types[1], ["int", MISSING, "null", "int"]);
         assert_eq!(result.rows_affected, Some(3));
         assert_eq!(
-            documents(vec![doc! { "a": null }]).columns[0]
+            documents(vec![doc! { "a": null }]).unwrap().columns[0]
                 .data_type
                 .as_deref(),
             Some("null")
@@ -3183,7 +3279,7 @@ mod tests {
 
     fn ran(connection: &Connection, statement: &str) -> QueryResult {
         connection
-            .query(statement, &CancelToken::default())
+            .query(statement, &CancelToken::default(), Fetch::default())
             .unwrap_or_else(|error| panic!("{statement}: {}", error.message))
     }
 
@@ -3192,8 +3288,8 @@ mod tests {
             connection,
             &format!("db.getCollection('{collection}').countDocuments()"),
         );
-        counted.rows[0][0]
-            .as_deref()
+        counted.rows[0]
+            .get(0)
             .and_then(|n| n.parse().ok())
             .expect("a count")
     }
@@ -3209,7 +3305,7 @@ mod tests {
             .iter()
             .position(|column| column.name == name)
             .unwrap_or_else(|| panic!("no column {name}: {:?}", result.columns));
-        (result.rows[row][at].as_deref(), result.cell_types[row][at])
+        (result.rows[row].get(at), result.cell_types[row][at])
     }
 
     fn names(result: &QueryResult) -> Vec<&str> {
@@ -3283,7 +3379,7 @@ mod tests {
             &connection,
             "db.getCollection('accounts').findOne({ plan: 'team' }, { _id: 0, plan: 1 })",
         );
-        assert_eq!(one.rows, [[Some("team".to_string())]]);
+        assert_eq!(one.rows, vec![vec![Some("team".to_string())]]);
         let grouped = ran(
             &connection,
             "db.accounts.aggregate([{ $group: { _id: '$plan', n: { $sum: 1 } } }, { $sort: { _id: 1 } }])",
@@ -3305,7 +3401,12 @@ mod tests {
 
         let collections = ran(&connection, "show collections");
         assert_eq!(names(&collections), ["name"]);
-        assert!(collections.rows.contains(&vec![Some("accounts".into())]));
+        assert!(
+            collections
+                .rows
+                .iter()
+                .any(|row| *row == vec![Some("accounts".into())])
+        );
         let databases = ran(&connection, "show dbs");
         assert_eq!(names(&databases), ["name", "sizeOnDisk"]);
         assert_eq!(field(&databases, 1, "name").0, Some("dbdelve_dev"));
@@ -3330,13 +3431,18 @@ mod tests {
         assert_eq!(field(&last, 0, "count").0, Some("3"));
 
         let error = connection
-            .query("db.accounts.find({ a: })", &CancelToken::default())
+            .query(
+                "db.accounts.find({ a: })",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
             .expect_err("a statement that does not parse is not sent");
         assert!(error.position.is_some(), "{}", error.message);
         let error = connection
             .query(
                 "db.accounts.aggregate([]).sort({ a: 1 })",
                 &CancelToken::default(),
+                Fetch::default(),
             )
             .expect_err("aggregate's cursor has no sort");
         assert!(
@@ -3521,6 +3627,7 @@ mod tests {
             let _ = self.0.query(
                 &format!("db.getCollection('{}').drop()", self.1),
                 &CancelToken::default(),
+                Fetch::default(),
             );
         }
     }
@@ -3613,7 +3720,7 @@ mod tests {
             );
         }
         // The document's own text, edited, keeps the types written inside it.
-        let doc = fetched.rows[0][at("doc")].clone().unwrap();
+        let doc = fetched.rows[0].get(at("doc")).unwrap().to_string();
         let edited = doc.replace("\"7\"", "\"8\"");
         assert_ne!(doc, edited, "{doc}");
         assert!(grid.set_pending(0, at("doc"), NewValue::Value(edited.into())));
@@ -3683,7 +3790,7 @@ mod tests {
              {collection}.insertOne({{_id: NumberLong(2)}});"
         );
         let error = connection
-            .query(&failing, &CancelToken::default())
+            .query(&failing, &CancelToken::default(), Fetch::default())
             .expect_err("a duplicate _id");
         assert!(
             error
@@ -3741,6 +3848,7 @@ mod tests {
                 .query(
                     &format!("db.getCollection('{}').{method}", scratch.1),
                     &CancelToken::default(),
+                    Fetch::default(),
                 )
                 .expect_err(method)
                 .message
@@ -3855,7 +3963,7 @@ mod tests {
         ];
         for statement in &hostile {
             let refused = connection
-                .query(statement, &CancelToken::default())
+                .query(statement, &CancelToken::default(), Fetch::default())
                 .expect_err(statement)
                 .message;
             assert!(
@@ -3865,10 +3973,7 @@ mod tests {
         }
         let listed = ran(&connection, "db.getCollectionNames()");
         assert!(
-            !listed
-                .rows
-                .iter()
-                .any(|row| row[0].as_deref() == Some(&scratch.1)),
+            !listed.rows.iter().any(|row| row.get(0) == Some(&scratch.1)),
             "a refused statement reached the server"
         );
         assert_eq!(count(&connection, "accounts"), 5);
@@ -3884,7 +3989,7 @@ mod tests {
         let slow = std::thread::spawn({
             let (connection, run) = (connection.clone(), run.clone());
             let statement = format!("{SLOW}.comment('{}')", comments[0]);
-            move || connection.query(&statement, &run)
+            move || connection.query(&statement, &run, Fetch::default())
         });
         (0..100)
             .find(|_| {
@@ -3925,8 +4030,13 @@ mod tests {
         let run = CancelToken::default();
         let started = Instant::now();
         let error = std::thread::scope(|scope| {
-            let slow =
-                scope.spawn(|| connection.query(SLOW.trim_end_matches(".maxTimeMS(60000)"), &run));
+            let slow = scope.spawn(|| {
+                connection.query(
+                    SLOW.trim_end_matches(".maxTimeMS(60000)"),
+                    &run,
+                    Fetch::default(),
+                )
+            });
             slow.join()
                 .unwrap()
                 .expect_err("the timeout should stop it")
@@ -3951,7 +4061,7 @@ mod tests {
             comments[0]
         );
         let error = connection
-            .query(&command, &run)
+            .query(&command, &run, Fetch::default())
             .expect_err("the timeout should stop it");
         assert!(
             error.message.contains("statement timeout"),
@@ -3963,6 +4073,101 @@ mod tests {
             "the server is still running it"
         );
         assert_eq!(count(&connection, "accounts"), 5);
+    }
+
+    /// `statement` under a row limit of `limit`, stopped past it only where
+    /// [`crate::sql::rerunnable`] says it reads, as the run path decides.
+    fn limited(connection: &Connection, statement: &str, limit: usize) -> QueryResult {
+        connection
+            .query(
+                statement,
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(limit),
+                    reads_only: crate::sql::rerunnable(Engine::MongoDb, statement),
+                    ..Fetch::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {}", error.message))
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_rows_past_the_limit_are_counted_and_a_read_is_stopped_there() {
+        let connection = live();
+        let counted = connection
+            .query(
+                "db.accounts.find()",
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(2),
+                    ..Fetch::default()
+                },
+            )
+            .expect("find should succeed");
+        assert_eq!(counted.rows.len(), 2);
+        assert_eq!(counted.cell_types.len(), 2);
+        assert_eq!(counted.capped_from, Some(5));
+        assert_eq!(counted.stopped, None);
+        assert!(counted.edit.is_some());
+
+        let whole = limited(&connection, "db.accounts.find()", 5);
+        assert_eq!((whole.rows.len(), whole.capped_from), (5, None));
+        assert_eq!(whole.stopped, None);
+
+        // A million documents, which a drain would take seconds over.
+        let comment = format!("dbdelve-test-{}", ObjectId::new());
+        let started = Instant::now();
+        let stopped = limited(
+            &connection,
+            &format!("db.events.find().comment('{comment}')"),
+            10,
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(stopped.rows.len(), 10);
+        assert_eq!(stopped.stopped, Some(Stopped::AtLimit));
+        assert_eq!(stopped.capped_from, None);
+        // Its cursor is killed rather than left open on the server.
+        let admin = connection.client().database("admin");
+        let open = || {
+            connection
+                .call(async {
+                    admin
+                        .aggregate([
+                            doc! { "$currentOp": { "idleCursors": true } },
+                            doc! { "$match": { "cursor.originatingCommand.comment": &comment } },
+                        ])
+                        .await?
+                        .try_collect::<Vec<Document>>()
+                        .await
+                })
+                .expect("$currentOp should list")
+        };
+        assert!(
+            (0..40).any(|_| {
+                let closed = open().is_empty();
+                if !closed {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                closed
+            }),
+            "the cursor is still open"
+        );
+        assert_eq!(count(&connection, "accounts"), 5);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_an_aggregate_that_writes_is_never_stopped_at_the_limit() {
+        let connection = live();
+        let scratch = Scratch(&connection, format!("dbdelve_test_{}", ObjectId::new()));
+        for stage in ["$merge", "$out"] {
+            let statement = format!("db.events.aggregate([{{ {stage}: '{}' }}])", scratch.1);
+            assert!(!crate::sql::rerunnable(Engine::MongoDb, &statement));
+            let result = limited(&connection, &statement, 1);
+            assert_eq!(result.stopped, None, "{stage}");
+            assert_eq!(count(&connection, &scratch.1), 1_000_000, "{stage}");
+        }
     }
 
     #[test]
@@ -3996,7 +4201,7 @@ mod tests {
                 "wide_metrics",
                 "",
                 &by_id,
-                10,
+                Some(10),
                 offset,
             );
             let result = generated(&connection, &statement);
@@ -4033,9 +4238,7 @@ mod tests {
             let statement =
                 crate::explorer::count_sql(Engine::MongoDb, "dbdelve_dev", "accounts", filter);
             let result = generated(&connection, &statement);
-            result.rows[0][0]
-                .as_deref()
-                .and_then(|n| n.parse::<u64>().ok())
+            result.rows[0].get(0).and_then(|n| n.parse::<u64>().ok())
         };
         let previewed = |filter: &str| {
             let statement = crate::explorer::preview_sql(
@@ -4043,7 +4246,7 @@ mod tests {
                 "dbdelve_dev",
                 "accounts",
                 filter,
-                100,
+                None,
                 0,
             );
             generated(&connection, &statement).rows.len() as u64

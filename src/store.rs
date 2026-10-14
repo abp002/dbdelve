@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Cell, EditTarget, RelationKind, SshTunnel};
+use crate::db::{EditTarget, RelationKind, Row, SshTunnel};
 use crate::i18n::{tr, trf};
 
 const PROFILES_FILE: &str = "profiles.toml";
@@ -236,10 +236,15 @@ pub struct StoredFilter {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredGrid {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<Cell>>,
+    pub rows: Vec<Row>,
     /// The row count before [`GRID_ROW_CAP`] trimmed it, so the UI can say
     /// "5000 of N" for a result that did not fit whole.
     pub total_rows: usize,
+    /// Set when the statement was stopped before it finished, so
+    /// [`Self::total_rows`] is what had arrived and not what it would have
+    /// returned. Absent from a snapshot written before it was kept.
+    #[serde(default)]
+    pub stopped: Option<crate::db::Stopped>,
     #[serde(default)]
     pub sort: Vec<(usize, bool)>,
     /// A relation tab's `ORDER BY`, as expression and direction. [`Self::sort`]
@@ -256,10 +261,18 @@ pub struct StoredGrid {
     pub client_sort: Option<Vec<(String, bool)>>,
     #[serde(default)]
     pub widths: Vec<f32>,
+    /// Hidden columns, as name and which of the same-named columns it is.
+    #[serde(default)]
+    pub hidden: Vec<(String, usize)>,
+    /// Pinned columns in pinned order, keyed like [`Self::hidden`].
+    #[serde(default)]
+    pub pinned: Vec<(String, usize)>,
     #[serde(default)]
     pub active: Option<(usize, usize)>,
     #[serde(default)]
     pub last_query: Option<String>,
+    /// A relation tab's row limit, `0` for none: absent already means a
+    /// snapshot from before it was kept, which takes the Settings default.
     #[serde(default)]
     pub limit: Option<usize>,
     /// The relation tab's filter, so reopening dbdelve lands on the rows that
@@ -316,6 +329,9 @@ pub struct StoredSettings {
     pub editor_font_size: Option<f32>,
     #[serde(default)]
     pub grid_font_size: Option<f32>,
+    /// The row limit a new tab starts with, `0` for none and absent for the
+    /// default. A number either way: anything else fails an older build's
+    /// decode of the whole file, which it reads as no profiles at all.
     #[serde(default)]
     pub preview_rows: Option<usize>,
     #[serde(default)]
@@ -338,6 +354,16 @@ pub struct StoredSettings {
     /// below the scalars.
     #[serde(default)]
     pub theme_opacity: Option<HashMap<String, f32>>,
+}
+
+impl StoredSettings {
+    pub fn row_limit(&self) -> Option<usize> {
+        match self.preview_rows {
+            Some(0) => None,
+            Some(rows) if rows <= crate::explorer::MAX_ROW_LIMIT => Some(rows),
+            _ => Some(crate::explorer::PREVIEW_ROW_LIMIT),
+        }
+    }
 }
 
 /// A named collection of connections. A connection is listed by at most one
@@ -752,10 +778,13 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             columns: grid.columns.clone(),
             rows: grid.rows[..GRID_ROW_CAP].to_vec(),
             total_rows: grid.total_rows,
+            stopped: grid.stopped,
             sort: grid.sort.clone(),
             order_by: grid.order_by.clone(),
             client_sort: grid.client_sort.clone(),
             widths: grid.widths.clone(),
+            hidden: grid.hidden.clone(),
+            pinned: grid.pinned.clone(),
             active: grid.active,
             last_query: grid.last_query.clone(),
             limit: grid.limit,
@@ -953,6 +982,26 @@ pub(crate) fn home() -> Result<PathBuf, String> {
         .ok_or_else(|| trf!("{} is not set.", key))
 }
 
+/// `~/x` as `x` under the home directory, the way a shell would have read it.
+/// A path typed into the form never passes through a shell, so left alone the
+/// `~` names a directory called `~` and the file is reported missing. Only the
+/// current user's `~/`: `~other/x` would need the password database, and is
+/// left as written along with everything else.
+pub(crate) fn home_expanded(path: &str) -> PathBuf {
+    expanded_against(path, home().ok().as_deref())
+}
+
+fn expanded_against(path: &str, home: Option<&Path>) -> PathBuf {
+    // `is_separator` is `/` everywhere and also `\` on Windows.
+    let rest = path
+        .strip_prefix('~')
+        .and_then(|rest| rest.strip_prefix(std::path::is_separator));
+    match (rest, home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
 fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
     if let Some(reason) = unsafe_component(profile_id) {
         return Err(trf!("Profile id {}.", reason));
@@ -994,7 +1043,7 @@ fn read_file(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-fn write_file(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn write_file(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| trf!("Could not create {}: {}", parent.display(), error))?;
@@ -1015,6 +1064,50 @@ fn write_file(path: &Path, contents: &str) -> Result<(), String> {
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+/// Where the theme files a user drops in, and the themes imported from other
+/// apps, are read from at startup.
+pub(crate) fn theme_directory() -> Result<PathBuf, String> {
+    Ok(dbdelve_directory()?.join("themes"))
+}
+
+/// Zed's own themes directory, as Zed's `paths::themes_dir` places it. On
+/// macOS that is `~/.config/zed` whatever `XDG_CONFIG_HOME` says.
+pub(crate) fn zed_theme_directory() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home()?.join(".config/zed/themes"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(data_root()?.join("Zed").join("themes"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            Some(config_home) => PathBuf::from(config_home),
+            None => home()?.join(".config"),
+        };
+        Ok(config.join("zed").join("themes"))
+    }
+}
+
+/// Where Zed installs extensions, each one a directory that may carry a
+/// `themes/` of its own. Unlike the config, Windows keeps these under the local
+/// profile rather than the roaming one.
+pub(crate) fn zed_extension_directory() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    let root = data_root()?.join("Zed");
+    #[cfg(target_os = "windows")]
+    let root = match std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+        Some(local) => PathBuf::from(local),
+        None => home()?.join("AppData").join("Local"),
+    }
+    .join("Zed");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let root = data_root()?.join("zed");
+    Ok(root.join("extensions").join("installed"))
 }
 
 /// Where a private key another client kept in its own store is written, since
@@ -1084,7 +1177,32 @@ fn secure(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::rows;
     use crate::theme::ConnectionColor;
+
+    #[test]
+    fn a_leading_tilde_is_the_home_directory() {
+        let home = Path::new("/home/ada");
+        assert_eq!(
+            expanded_against("~/data/app.db", Some(home)),
+            Path::new("/home/ada/data/app.db")
+        );
+        for path in ["/srv/app.db", "data/~/app.db", "~ada/app.db", "~"] {
+            assert_eq!(expanded_against(path, Some(home)), Path::new(path));
+        }
+        // With no home directory to put in its place, the path is left as
+        // typed and fails as missing, rather than resolving somewhere else.
+        assert_eq!(expanded_against("~/app.db", None), Path::new("~/app.db"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_tilde_and_backslash_is_the_home_directory_on_windows() {
+        assert_eq!(
+            expanded_against(r"~\data\app.db", Some(Path::new(r"C:\Users\ada"))),
+            Path::new(r"C:\Users\ada\data\app.db")
+        );
+    }
 
     /// `HOME` is process-wide and the tests run in threads, so the ones that
     /// touch the disk take turns and each gets its own directory to be the
@@ -1341,6 +1459,21 @@ user = "shayan"
 
         assert_eq!(decoded.profiles, vec![profile]);
         assert_eq!(decoded.active.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn a_row_limit_reads_back_from_a_plain_number_with_zero_for_none() {
+        let limit = |settings: &str| {
+            toml::from_str::<ProfileFile>(&format!("[settings]\n{settings}"))
+                .expect("settings must decode")
+                .settings
+                .expect("settings were written")
+                .row_limit()
+        };
+        // What every build before "No limit" wrote.
+        assert_eq!(limit("preview_rows = 500"), Some(500));
+        assert_eq!(limit(""), Some(crate::explorer::PREVIEW_ROW_LIMIT));
+        assert_eq!(limit("preview_rows = 0"), None);
     }
 
     #[test]
@@ -2291,12 +2424,15 @@ open_objects = []
         with_home(|| {
             let grid = StoredGrid {
                 columns: vec!["n".into()],
-                rows: vec![vec![Some("1".into())]],
+                rows: rows(vec![vec![Some("1".into())]]),
                 total_rows: 1,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: None,
                 widths: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -2339,12 +2475,15 @@ open_objects = []
         with_home(|| {
             let small = StoredGrid {
                 columns: vec!["id".into(), "name".into()],
-                rows: vec![vec![Some("1".into()), None]],
+                rows: rows(vec![vec![Some("1".into()), None]]),
                 total_rows: 1,
+                stopped: None,
                 sort: vec![(0, true)],
                 order_by: vec![("created_at".into(), false)],
                 client_sort: Some(vec![("\"name\"".into(), false)]),
                 widths: vec![80.0, 160.0],
+                hidden: vec![("name".into(), 1)],
+                pinned: vec![("id".into(), 0)],
                 active: Some((0, 1)),
                 last_query: Some("select * from accounts".into()),
                 limit: Some(1_000),
@@ -2372,14 +2511,19 @@ open_objects = []
             // says the rest existed.
             let oversized = StoredGrid {
                 columns: vec!["n".into()],
-                rows: (0..GRID_ROW_CAP + 10)
-                    .map(|n| vec![Some(n.to_string())])
-                    .collect(),
+                rows: rows(
+                    (0..GRID_ROW_CAP + 10)
+                        .map(|n| vec![Some(n.to_string())])
+                        .collect(),
+                ),
                 total_rows: GRID_ROW_CAP + 10,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: Some(Vec::new()),
                 widths: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -2423,12 +2567,15 @@ open_objects = []
         with_home(|| {
             let filtered = StoredGrid {
                 columns: vec!["id".into()],
-                rows: vec![vec![Some("1".into())]],
+                rows: rows(vec![vec![Some("1".into())]]),
                 total_rows: 1,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: vec![("\"id\"".into(), true)],
                 client_sort: None,
                 widths: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: Some(1_000),

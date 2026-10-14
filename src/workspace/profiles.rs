@@ -45,7 +45,7 @@ impl Workspace {
             chrome_font_size: Some(self.settings.chrome_font_size),
             editor_font_size: Some(self.settings.editor_font_size),
             grid_font_size: Some(self.settings.grid_font_size),
-            preview_rows: Some(self.settings.preview_rows),
+            preview_rows: Some(self.settings.row_limit.unwrap_or(0)),
             opacity: Some(self.settings.opacity),
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
@@ -100,6 +100,10 @@ impl Workspace {
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
             },
             Engine::DuckDb => ConnectionConfig::DuckDb {
+                path: stored.path.unwrap_or_default(),
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            },
+            Engine::Turso => ConnectionConfig::Turso {
                 path: stored.path.unwrap_or_default(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
             },
@@ -175,6 +179,7 @@ impl Workspace {
             stored.open_objects,
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -217,6 +222,8 @@ impl Workspace {
             confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
             session,
@@ -249,6 +256,7 @@ impl Workspace {
             Vec::new(),
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -263,6 +271,8 @@ impl Workspace {
             confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
             session,
@@ -347,7 +357,9 @@ impl Workspace {
         // throw away a half-typed connection to a different database, which the
         // user never asked to lose by pasting a URL.
         let filled = match &config {
-            ConnectionConfig::Sqlite { path, .. } | ConnectionConfig::DuckDb { path, .. } => vec![
+            ConnectionConfig::Sqlite { path, .. }
+            | ConnectionConfig::DuckDb { path, .. }
+            | ConnectionConfig::Turso { path, .. } => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.path, path.clone()),
             ],
@@ -1241,6 +1253,8 @@ impl Workspace {
         };
         profile.generation = generation;
         profile.state = ProfileState::Connecting;
+        profile.in_transaction = false;
+        profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
 
         let id = profile.id.clone();
@@ -1277,6 +1291,7 @@ impl Workspace {
                         .set_read_only(true)
                         .map_err(|error| error.message)?;
                 }
+                connection.warm();
                 Ok(connection)
             }
         });
@@ -1602,6 +1617,12 @@ impl Workspace {
             profile.session.clear_prompts();
         }
         self.connect_active(cx);
+        // A connect that landed while this profile was behind another one ran
+        // nothing on its tab in front, which may still be a restored snapshot
+        // waiting for its first run.
+        if let Some(Tab::Object(object)) = self.profile().map(|profile| profile.session.active) {
+            self.load_relation(object, cx);
+        }
         cx.notify();
     }
 

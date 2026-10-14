@@ -14,8 +14,8 @@
 //! result column was read from, which is exactly what in-grid editing needs, so
 //! there is no describe step and nothing here can disturb an open transaction.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,9 +25,9 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
 
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, ForeignKey, NamedDefinition, QueryResult,
-    Reference, Structure, assemble_catalog, assemble_references, assemble_structure, home_expanded,
-    non_utf8_error, percent_decoded, plain_error, required_cell,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, ForeignKey, NamedDefinition, QueryResult,
+    Reference, RowBuilder, Stopped, Structure, assemble_catalog, assemble_references,
+    assemble_structure, non_utf8_error, percent_decoded, plain_error, required_cell,
 };
 use crate::i18n::{tr, trf};
 
@@ -78,32 +78,18 @@ pub struct Connection {
     /// The profile's statement timeout. SQLite has no such setting, so this is
     /// a wall-clock timer firing the same interrupt — see `run`.
     statement_timeout: Option<Duration>,
+    /// The file, for [`Self::alongside`] to open again; `None` in memory.
+    path: Option<String>,
 }
 
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
-        // Deliberately no `SQLITE_OPEN_CREATE`. With it, a mistyped path is an
-        // empty database that opens successfully and then reports an empty
-        // catalog, which reads as "this database has nothing in it" rather than
-        // "this is not the file you meant". dbdelve would also have littered a
-        // file onto the user's disk to tell them so.
-        //
-        // `SQLITE_OPEN_URI` is off for the same reason: the path came out of the
-        // URL already, and leaving URI parsing on would make a path containing
-        // `?` mean something other than itself.
-        let expanded = home_expanded(path);
-        let path = expanded.as_str();
-        if !Path::new(path).exists() {
-            return Err(plain_error(trf!("No database file at {}", path)));
+        let path = crate::store::home_expanded(path);
+        if !path.exists() {
+            return Err(plain_error(trf!("No database file at {}", path.display())));
         }
 
-        let connection = rusqlite::Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| plain_error(trf!("Cannot open {}: {}", path, describe(&error))))?;
-
-        Ok(Self::wrap(connection, statement_timeout))
+        Ok(Self::wrap(open_file(&path)?, statement_timeout))
     }
 
     fn wrap(connection: rusqlite::Connection, statement_timeout: u32) -> Self {
@@ -111,8 +97,26 @@ impl Connection {
             interrupt: Arc::new(connection.get_interrupt_handle()),
             statement_timeout: (statement_timeout > 0)
                 .then(|| Duration::from_secs(u64::from(statement_timeout))),
+            path: connection
+                .path()
+                .filter(|path| !path.is_empty())
+                .map(str::to_string),
             connection: Arc::new(Mutex::new(connection)),
         }
+    }
+
+    /// A second connection to the same file, for a statement to run on beside
+    /// this one's; see [`super::Connection::query_alongside`].
+    pub fn alongside(&self) -> Result<Self, DbError> {
+        let path = self.path.as_deref().ok_or_else(|| {
+            plain_error("An in-memory database cannot be opened a second time.".into())
+        })?;
+        let connection = open_file(std::path::Path::new(path))?;
+        Ok(Self {
+            interrupt: Arc::new(connection.get_interrupt_handle()),
+            connection: Arc::new(Mutex::new(connection)),
+            ..self.clone()
+        })
     }
 
     /// Interrupting is local and immediate: there is no server to ask, so
@@ -147,22 +151,23 @@ impl Connection {
         Some(sender)
     }
 
-    /// Run one statement verbatim.
+    /// Run one statement verbatim, keeping what `fetch` asks for of its rows;
+    /// see [`super::Connection::query`].
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Row
-    /// limits belong to the caller that *generated* a query, never to one the
-    /// user typed.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, true)
+    /// The SQL is never rewritten — no limit injected, no reformatting. The
+    /// rows are stepped one at a time, so one past the limit is dropped as
+    /// soon as it is counted.
+    pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(sql, true, fetch)
     }
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for the
     /// round trip that reads a primary key.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false)
+        self.run(sql, false, Fetch::default())
     }
 
-    fn run(&self, sql: &str, editable: bool) -> Result<QueryResult, DbError> {
+    fn run(&self, sql: &str, editable: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
         // Armed before the lock rather than after it, so time spent queued
         // behind another statement on this connection counts against the limit
         // too. Dropped at the end of this call, whichever way it leaves.
@@ -171,9 +176,13 @@ impl Connection {
             message: tr("The connection is unavailable after an earlier internal failure.").into(),
             position: None,
         })?;
+        fetch.hold()?;
 
         let mut result = QueryResult::default();
         let mut probed = Vec::new();
+        // How long the kept rows took, once there were as many as the limit.
+        let mut filled = None;
+        let mut past_limit = false;
 
         // Whether this submission is the one that opened a transaction, asked
         // before it runs: a transaction the user began in an earlier run is
@@ -192,6 +201,7 @@ impl Connection {
             // profile's queries, and time spent waiting behind the catalog load
             // is not time spent on this statement.
             let started = Instant::now();
+            let mut builder = RowBuilder::default();
             while let Some(mut statement) =
                 batch.next().map_err(|error| query_error(&error, sql))?
             {
@@ -230,39 +240,77 @@ impl Connection {
 
                 // One selection can carry several statements, and the grid shows
                 // one result set, so each new description starts the kept set
-                // over and the last statement wins.
+                // over and the last statement wins. The declared types came
+                // with the description, so the rows are shown by type from the
+                // first.
+                if let Some(feed) = fetch.feed {
+                    feed.begin(columns.clone());
+                }
                 let mut rows = Vec::new();
                 let mut bytes = 0;
-                let mut returned = statement
+                // This set's rows, kept or not, and kept: a fed row is not in
+                // `rows` to be counted.
+                let (mut returned, mut kept) = (0, 0);
+                filled = None;
+                let mut stepped = statement
                     .query([])
                     .map_err(|error| query_error(&error, sql))?;
-                while let Some(row) = returned.next().map_err(|error| query_error(&error, sql))? {
-                    let cells: Vec<Cell> = (0..columns.len())
-                        .map(|index| {
-                            let value = row
-                                .get_ref(index)
-                                .map_err(|error| query_error(&error, sql))?;
-                            render(value, &columns, index)
-                        })
-                        .collect::<Result<_, _>>()?;
-
-                    bytes += cells
-                        .iter()
-                        .filter_map(|cell| cell.as_ref().map(String::len))
-                        .sum::<usize>();
-                    rows.push(cells);
+                while let Some(row) = stepped.next().map_err(|error| query_error(&error, sql))? {
+                    returned += 1;
+                    if fetch.limit.is_some_and(|limit| kept >= limit) {
+                        // There is no server to tell: a read is stopped by
+                        // stepping it no further. Dropping `stepped` resets the
+                        // statement, which ends the read transaction it opened
+                        // and leaves one the user began as it was.
+                        if fetch.reads_only {
+                            result.stopped = Some(Stopped::AtLimit);
+                            break;
+                        }
+                        continue;
+                    }
+                    kept += 1;
+                    if fetch.limit == Some(kept) {
+                        filled = Some(started.elapsed());
+                        if let Some(feed) = fetch.feed {
+                            feed.fill();
+                        }
+                    }
+                    for index in 0..columns.len() {
+                        let value = row
+                            .get_ref(index)
+                            .map_err(|error| query_error(&error, sql))?;
+                        let cell = render(value, &columns, index)?;
+                        builder.push(cell.as_deref());
+                    }
+                    let cells = builder.finish()?;
+                    bytes += cells.text_len();
+                    match fetch.feed {
+                        Some(feed) => feed.push(cells),
+                        None => rows.push(cells),
+                    }
                 }
 
                 // A query's count is the rows it returned. `changes()` would
                 // report whatever the statement before it modified, since
                 // SQLite does not reset it for a select.
-                result.rows_affected = Some(rows.len() as u64);
+                result.rows_affected = Some(returned as u64);
+                result.capped_from =
+                    (result.stopped.is_none() && returned > kept).then_some(returned);
+                past_limit = returned > kept;
                 result.columns = columns;
                 result.rows = rows;
                 result.bytes = bytes;
                 probed = described;
+                if result.stopped.is_some() {
+                    break;
+                }
             }
-            result.elapsed = started.elapsed();
+            // Timed to the last kept row when rows past the limit came after
+            // it: draining the statement is not the wait for these.
+            result.elapsed = match filled {
+                Some(filled) if past_limit => filled,
+                _ => started.elapsed(),
+            };
             Ok(())
         })();
 
@@ -291,8 +339,70 @@ impl Connection {
         // ponytail: one pragma per result set, no cache. A map from table to key
         // held on the connection is the upgrade path if the trip shows up in
         // query timings.
-        let key = self.primary_key(&schema, &table).ok()?;
+        let key = self.schema().primary_key(&schema, &table).ok()?;
         resolve_edit_target(probed, &schema, &table, &key)
+    }
+
+    fn schema(&self) -> Schema<impl Fn(&str) -> Result<QueryResult, DbError> + '_> {
+        Schema {
+            run: |sql: &str| self.internal_query(sql),
+            engine: Engine::Sqlite,
+        }
+    }
+
+    pub fn catalog(&self) -> Result<Catalog, DbError> {
+        self.schema().catalog()
+    }
+
+    pub fn routines(&self) -> Result<Catalog, DbError> {
+        self.schema().routines()
+    }
+
+    pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
+        self.schema().references(schema, relation)
+    }
+
+    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        self.schema().structure(schema, relation)
+    }
+
+    pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        self.schema().ddl(schema, relation)
+    }
+}
+
+pub(super) struct Schema<F> {
+    pub(super) run: F,
+    pub(super) engine: Engine,
+}
+
+impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
+    fn argument(&self, schema: &str) -> String {
+        match self.engine {
+            Engine::Sqlite => format!(", {}", self.engine.quote_literal(schema)),
+            Engine::Turso => String::new(),
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::SqlServer
+            | Engine::DuckDb
+            | Engine::Snowflake
+            | Engine::MongoDb => unreachable!("only the file engines read pragmas"),
+        }
+    }
+
+    fn hidden(&self) -> &'static [&'static str] {
+        match self.engine {
+            Engine::Sqlite => &[],
+            Engine::Turso => &["__turso_internal_"],
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::SqlServer
+            | Engine::DuckDb
+            | Engine::Snowflake
+            | Engine::MongoDb => unreachable!("only the file engines read pragmas"),
+        }
     }
 
     /// The table's primary key columns, in key order.
@@ -302,40 +412,40 @@ impl Connection {
     /// the user selected it, and a predicate dbdelve cannot read off the grid is
     /// a predicate it must not write.
     fn primary_key(&self, schema: &str, table: &str) -> Result<Vec<String>, DbError> {
-        let result = self.internal_query(&format!(
+        let result = (self.run)(&format!(
             "SELECT name AS column_name
-             FROM pragma_table_info({table}, {schema})
+             FROM pragma_table_info({table}{schema})
              WHERE pk > 0
              ORDER BY pk",
-            table = Engine::Sqlite.quote_literal(table),
-            schema = Engine::Sqlite.quote_literal(schema),
+            table = self.engine.quote_literal(table),
+            schema = self.argument(schema),
         ))?;
 
         column_of(&result, "column_name")
     }
 
-    pub fn catalog(&self) -> Result<Catalog, DbError> {
+    pub(super) fn catalog(&self) -> Result<Catalog, DbError> {
         let schemas = self.schemas()?;
         if schemas.is_empty() {
             return Ok(Catalog::default());
         }
 
-        let relations = self.internal_query(&relations_sql(&schemas))?;
+        let relations = (self.run)(&relations_sql(self.engine, &schemas, self.hidden()))?;
         assemble_catalog(relations, QueryResult::default())
     }
 
     /// SQLite has no stored functions or procedures at all, so an empty list is
     /// the true answer rather than a gap in what dbdelve can see -- and there is
     /// nothing to ask the file for.
-    pub fn routines(&self) -> Result<Catalog, DbError> {
+    pub(super) fn routines(&self) -> Result<Catalog, DbError> {
         Ok(Catalog::default())
     }
 
     /// `main`, `temp`, and anything `ATTACH`ed — under SQLite's own names for
     /// them, which is what the user typed if they attached it.
     fn schemas(&self) -> Result<Vec<String>, DbError> {
-        let result = self
-            .internal_query("SELECT name AS schema_name FROM pragma_database_list ORDER BY seq")?;
+        let result =
+            (self.run)("SELECT name AS schema_name FROM pragma_database_list ORDER BY seq")?;
 
         column_of(&result, "schema_name")
     }
@@ -344,43 +454,45 @@ impl Connection {
     /// referenced side, so every table of the schema is asked what it
     /// references. A key that names no column of the parent references the
     /// parent's primary key, filled in the way [`Connection::foreign_keys`] does.
-    pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
-        let mut result = self.internal_query(&format!(
+    pub(super) fn references(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<Reference>, DbError> {
+        let mut result = (self.run)(&format!(
             "SELECT {schema_literal} AS source_schema,
                     tables.name AS source_table,
                     keys.\"from\" AS column_name,
                     COALESCE(keys.\"to\", '') AS referenced_column,
                     keys.id AS constraint_name
              FROM {schema_name}.sqlite_master AS tables,
-                  pragma_foreign_key_list(tables.name, {schema_literal}) AS keys
+                  pragma_foreign_key_list(tables.name{schema_argument}) AS keys
              WHERE tables.type = 'table'
                AND keys.\"table\" = {relation} COLLATE NOCASE
              ORDER BY tables.name, keys.id, keys.seq",
-            schema_literal = Engine::Sqlite.quote_literal(schema),
-            schema_name = Engine::Sqlite.quote_identifier(schema),
-            relation = Engine::Sqlite.quote_literal(relation),
+            schema_literal = self.engine.quote_literal(schema),
+            schema_argument = self.argument(schema),
+            schema_name = self.engine.quote_identifier(schema),
+            relation = self.engine.quote_literal(relation),
         ))?;
-        if result
-            .rows
-            .iter()
-            .any(|row| row.get(3).is_some_and(|cell| cell.as_deref() == Some("")))
-        {
+        if result.rows.iter().any(|row| row.get(3) == Some("")) {
             let key = self.primary_key(schema, relation)?;
+            let only = match key.as_slice() {
+                [only] => Some(only.as_str()),
+                _ => None,
+            };
             for row in &mut result.rows {
-                if row[3].as_deref() == Some("") {
-                    row[3] = match key.as_slice() {
-                        [only] => Some(only.clone()),
-                        _ => None,
-                    };
+                if row.get(3) == Some("") {
+                    row.replace(&[(3, only)]);
                 }
             }
-            result.rows.retain(|row| row[3].is_some());
+            result.rows.retain(|row| row.get(3).is_some());
         }
         assemble_references(&result)
     }
 
-    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
-        let columns = self.internal_query(&format!(
+    pub(super) fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        let columns = (self.run)(&format!(
             "SELECT name AS column_name,
                     type AS data_type,
                     CASE
@@ -394,17 +506,17 @@ impl Connection {
                              AND upper(type) = 'INTEGER'
                              AND (
                                  SELECT count(*)
-                                 FROM pragma_table_info({relation}, {schema})
+                                 FROM pragma_table_info({relation}{schema})
                                  WHERE pk > 0
                              ) = 1
                             THEN 'no'
                         ELSE 'yes'
                     END AS nullable,
                     COALESCE(dflt_value, '') AS column_default
-             FROM pragma_table_info({relation}, {schema})
+             FROM pragma_table_info({relation}{schema})
              ORDER BY cid",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
         ))?;
 
         // The shared assembler reads the columns; SQLite has no catalog of
@@ -421,13 +533,13 @@ impl Connection {
     /// The relation's own `CREATE` first, then its indexes and triggers in
     /// the order they were made. An index SQLite made for a constraint has no
     /// text, and is declared by the table's.
-    pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
-        let listed = self.internal_query(&format!(
+    pub(super) fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        let listed = (self.run)(&format!(
             "SELECT sql FROM {}.sqlite_master
              WHERE tbl_name = {} COLLATE NOCASE AND sql IS NOT NULL
              ORDER BY type NOT IN ('table', 'view'), rowid",
-            Engine::Sqlite.quote_identifier(schema),
-            Engine::Sqlite.quote_literal(relation),
+            self.engine.quote_identifier(schema),
+            self.engine.quote_literal(relation),
         ))?;
         let statements = column_of(&listed, "sql")?;
         if statements.is_empty() {
@@ -444,18 +556,18 @@ impl Connection {
     /// SQLite created to enforce a `UNIQUE` or `PRIMARY KEY` has no row there at
     /// all, so its definition is reconstructed from the columns it covers.
     fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<NamedDefinition>, DbError> {
-        let listed = self.internal_query(&format!(
+        let listed = (self.run)(&format!(
             "SELECT index_list.name AS object_name,
                     index_list.\"unique\" AS is_unique,
                     COALESCE(sqlite_master.sql, '') AS definition
-             FROM pragma_index_list({relation}, {schema}) AS index_list
+             FROM pragma_index_list({relation}{schema}) AS index_list
              LEFT JOIN {schema_identifier}.sqlite_master
                     ON sqlite_master.type = 'index'
                    AND sqlite_master.name = index_list.name
              ORDER BY index_list.name",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
-            schema_identifier = Engine::Sqlite.quote_identifier(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
+            schema_identifier = self.engine.quote_identifier(schema),
         ))?;
 
         let mut indexes = Vec::new();
@@ -483,12 +595,12 @@ impl Connection {
     }
 
     fn index_columns(&self, schema: &str, index: &str) -> Result<Vec<String>, DbError> {
-        let result = self.internal_query(&format!(
+        let result = (self.run)(&format!(
             "SELECT name AS column_name
-             FROM pragma_index_info({index}, {schema})
+             FROM pragma_index_info({index}{schema})
              ORDER BY seqno",
-            index = Engine::Sqlite.quote_literal(index),
-            schema = Engine::Sqlite.quote_literal(schema),
+            index = self.engine.quote_literal(index),
+            schema = self.argument(schema),
         ))?;
 
         column_of(&result, "column_name")
@@ -510,15 +622,15 @@ impl Connection {
             });
         }
 
-        let listed = self.internal_query(&format!(
+        let listed = (self.run)(&format!(
             "SELECT id AS constraint_id,
                     \"table\" AS target_relation,
                     \"from\" AS source_column,
                     COALESCE(\"to\", '') AS target_column
-             FROM pragma_foreign_key_list({relation}, {schema})
+             FROM pragma_foreign_key_list({relation}{schema})
              ORDER BY id, seq",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
         ))?;
 
         // One constraint spans one row per column, so the rows are grouped here
@@ -565,15 +677,15 @@ impl Connection {
     /// The same pragma as [`Connection::constraints`], kept as fields: one
     /// entry per column of every foreign key, in key order.
     fn foreign_keys(&self, schema: &str, relation: &str) -> Result<Vec<ForeignKey>, DbError> {
-        let listed = self.internal_query(&format!(
+        let listed = (self.run)(&format!(
             "SELECT id AS constraint_id,
                     \"table\" AS target_relation,
                     \"from\" AS source_column,
                     COALESCE(\"to\", '') AS target_column
-             FROM pragma_foreign_key_list({relation}, {schema})
+             FROM pragma_foreign_key_list({relation}{schema})
              ORDER BY id, seq",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
         ))?;
 
         let mut listed_keys = Vec::with_capacity(listed.rows.len());
@@ -742,7 +854,16 @@ fn resolve_edit_target(
 
 /// One `sqlite_master` scan per schema, aliased to the column names
 /// [`assemble_catalog`] reads rather than to SQLite's own.
-fn relations_sql(schemas: &[String]) -> String {
+fn relations_sql(engine: Engine, schemas: &[String], hidden: &[&str]) -> String {
+    let hidden: String = hidden
+        .iter()
+        .map(|prefix| {
+            format!(
+                "\n                   AND name NOT LIKE '{}%' ESCAPE '\\'",
+                prefix.replace('_', "\\_")
+            )
+        })
+        .collect();
     let scans: Vec<String> = schemas
         .iter()
         .map(|schema| {
@@ -755,9 +876,9 @@ fn relations_sql(schemas: &[String]) -> String {
                         END AS relation_kind
                  FROM {schema_identifier}.sqlite_master
                  WHERE type IN ('table', 'view')
-                   AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
-                schema_literal = Engine::Sqlite.quote_literal(schema),
-                schema_identifier = Engine::Sqlite.quote_identifier(schema),
+                   AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'{hidden}",
+                schema_literal = engine.quote_literal(schema),
+                schema_identifier = engine.quote_identifier(schema),
             )
         })
         .collect();
@@ -791,30 +912,34 @@ fn quoted_list(names: &[String]) -> String {
 /// Postgres has the server do this and hands dbdelve the result; here it is
 /// dbdelve's decision, so each one is made to be reversible — what the grid shows
 /// is something SQLite would accept back.
-fn render(value: ValueRef<'_>, columns: &[Column], index: usize) -> Result<Cell, DbError> {
+fn render<'a>(
+    value: ValueRef<'a>,
+    columns: &[Column],
+    index: usize,
+) -> Result<Option<Cow<'a, str>>, DbError> {
     Ok(match value {
         ValueRef::Null => None,
-        ValueRef::Integer(integer) => Some(integer.to_string()),
-        ValueRef::Real(real) => Some(render_real(real)),
+        ValueRef::Integer(integer) => Some(integer.to_string().into()),
+        ValueRef::Real(real) => Some(render_real(real).into()),
         // A database whose text was written as something other than UTF-8 can
         // return bytes that are not text at all. Postgres raises the same error
         // for the same reason, naming the column rather than the row.
         ValueRef::Text(bytes) => Some(
             std::str::from_utf8(bytes)
                 .map_err(|_| non_utf8_error(columns, index))?
-                .to_string(),
+                .into(),
         ),
         // SQLite's own literal syntax for a blob, rather than bare hex, so a
         // value copied out of the grid is a value that can be pasted into a
         // statement.
-        ValueRef::Blob(bytes) => Some(format!("x'{}'", hex::encode_upper(bytes))),
+        ValueRef::Blob(bytes) => Some(format!("x'{}'", hex::encode_upper(bytes)).into()),
     })
 }
 
 /// A real keeps its point even when it is whole. Rust renders `1.0` as `1`,
 /// which in a SQLite grid is the rendering of an integer, and the difference
 /// between the two storage classes is one the user is entitled to see.
-fn render_real(real: f64) -> String {
+pub(super) fn render_real(real: f64) -> String {
     let rendered = real.to_string();
     match real.is_finite() && !rendered.contains(['.', 'e', 'E']) {
         true => format!("{rendered}.0"),
@@ -843,6 +968,29 @@ fn query_error(error: &rusqlite::Error, submission: &str) -> DbError {
             position: None,
         },
     }
+}
+
+/// Deliberately no `SQLITE_OPEN_CREATE`. With it, a mistyped path is an empty
+/// database that opens successfully and then reports an empty catalog, which
+/// reads as "this database has nothing in it" rather than "this is not the file
+/// you meant". dbdelve would also have littered a file onto the user's disk to
+/// tell them so.
+///
+/// `SQLITE_OPEN_URI` is off for the same reason: the path came out of the URL
+/// already, and leaving URI parsing on would make a path containing `?` mean
+/// something other than itself.
+fn open_file(path: &std::path::Path) -> Result<rusqlite::Connection, DbError> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| {
+        plain_error(format!(
+            "Cannot open {}: {}",
+            path.display(),
+            describe(&error)
+        ))
+    })
 }
 
 /// End the transaction a failed batch left open, and say so in the error.
@@ -915,6 +1063,56 @@ SELECT count(*) FROM forever
 ";
 
     #[test]
+    fn a_cancel_reaches_a_statement_run_alongside_on_the_profiles_own_connection() {
+        // An in-memory database cannot be opened again, so the statement falls
+        // back to the connection it was asked on.
+        let connection = crate::db::Connection::Sqlite(memory(ACCOUNTS));
+        let cancel = crate::db::CancelToken::alongside();
+        let error = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                connection.cancel(&cancel).expect("cancelling cannot fail");
+            });
+            connection.query_alongside(FOREVER, &cancel, Fetch::default(), false)
+        })
+        .expect_err("the statement should be interrupted");
+        assert!(
+            crate::db::is_cancel(Engine::Sqlite, &error),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_cancel_while_the_fallback_waits_drops_it_and_spares_the_statement_ahead() {
+        let connection = crate::db::Connection::Sqlite(memory(""));
+        let cancel = crate::db::CancelToken::alongside();
+        let counted = "
+WITH RECURSIVE counting(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counting WHERE n < 10000000)
+SELECT count(*) FROM counting
+";
+        let (ahead, lane) = std::thread::scope(|scope| {
+            let ahead = scope.spawn(|| {
+                connection.query(
+                    counted,
+                    &crate::db::CancelToken::default(),
+                    Fetch::default(),
+                )
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            let lane = scope
+                .spawn(|| connection.query_alongside("SELECT 1", &cancel, Fetch::default(), false));
+            std::thread::sleep(Duration::from_millis(100));
+            connection.cancel(&cancel).expect("cancelling cannot fail");
+            (ahead.join().unwrap(), lane.join().unwrap())
+        });
+        let ahead = ahead.expect("the statement ahead should not be stopped");
+        assert_eq!(ahead.rows, vec![vec![Some("10000000".to_string())]]);
+        let lane = lane.expect_err("the waiting statement should be dropped");
+        assert_eq!(lane.message, "Cancelled before it was sent.");
+    }
+
+    #[test]
     fn a_cancel_from_another_thread_stops_a_statement_and_leaves_the_connection_usable() {
         let connection = memory(ACCOUNTS);
         let canceller = connection.clone();
@@ -924,14 +1122,14 @@ SELECT count(*) FROM forever
         });
 
         let error = connection
-            .query(FOREVER)
+            .query(FOREVER, Fetch::default())
             .expect_err("the statement should be interrupted");
         assert!(error.message.contains("interrupt"), "{}", error.message);
 
         // The interrupt ends the statement, not the connection. A cancel that
         // left the profile dead would be worse than the runaway.
         let rows = connection
-            .query("SELECT count(*) FROM accounts")
+            .query("SELECT count(*) FROM accounts", Fetch::default())
             .expect("the connection should still work")
             .rows;
         assert_eq!(rows, vec![vec![Some("2".to_string())]]);
@@ -941,10 +1139,159 @@ SELECT count(*) FROM forever
     fn a_statement_timeout_stops_a_runaway_on_its_own() {
         let connection = memory_with_timeout(ACCOUNTS, 1);
         let error = connection
-            .query(FOREVER)
+            .query(FOREVER, Fetch::default())
             .expect_err("the statement should time out");
         assert!(error.message.contains("interrupt"), "{}", error.message);
-        assert!(connection.query("SELECT 1").is_ok());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    /// Every whole number from 1, for as long as it is stepped.
+    const ENDLESS: &str = "
+WITH RECURSIVE counting(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counting)
+SELECT n FROM counting
+";
+
+    fn limited(limit: usize, reads_only: bool) -> Fetch<'static> {
+        Fetch {
+            limit: Some(limit),
+            reads_only,
+            ..Fetch::default()
+        }
+    }
+
+    #[test]
+    fn a_row_limit_keeps_the_first_rows_and_counts_the_rest() {
+        let connection = memory("");
+        let ten = "
+WITH RECURSIVE counting(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counting WHERE n < 10)
+SELECT n FROM counting
+";
+
+        let capped = connection
+            .query(ten, limited(3, false))
+            .expect("query should succeed");
+        assert_eq!(
+            capped.rows,
+            vec![
+                vec![Some("1".to_string())],
+                vec![Some("2".to_string())],
+                vec![Some("3".to_string())],
+            ]
+        );
+        assert_eq!(capped.capped_from, Some(10));
+        assert_eq!(capped.total_rows(), 10);
+        assert_eq!(capped.rows_affected, Some(10));
+        assert_eq!(capped.stopped, None);
+
+        let whole = connection
+            .query(ten, limited(10, true))
+            .expect("query should succeed");
+        assert_eq!(whole.rows.len(), 10);
+        assert_eq!(whole.capped_from, None);
+        assert_eq!(whole.stopped, None);
+    }
+
+    #[test]
+    fn a_fed_query_hands_its_typed_rows_to_the_feed() {
+        let connection = memory(ACCOUNTS);
+        let feed = crate::db::Feed::default();
+        let result = connection
+            .query(
+                "SELECT id, name FROM accounts ORDER BY id",
+                Fetch {
+                    limit: Some(1),
+                    feed: Some(&feed),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        let fed = feed.take();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.capped_from, Some(2));
+        assert_eq!(fed.rows, vec![vec![Some("1".into()), Some("Ada".into())]]);
+        assert!(fed.filled.is_some());
+        let fed_types: Vec<_> = fed
+            .columns
+            .iter()
+            .map(|column| column.data_type.as_deref())
+            .collect();
+        assert_eq!(fed_types, vec![Some("integer"), Some("text")]);
+    }
+
+    #[test]
+    fn a_read_past_the_limit_is_stopped_and_lets_go_of_the_database() {
+        let path = std::env::temp_dir().join(format!("dbdelve-stopped-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let writer = rusqlite::Connection::open(&path).expect("the file should open");
+        writer.execute_batch(ACCOUNTS).unwrap();
+        // The timeout turns a read that was never stopped into a failure
+        // rather than a test that never ends.
+        let connection = Connection::wrap(rusqlite::Connection::open(&path).unwrap(), 10);
+
+        let started = Instant::now();
+        let result = connection
+            .query(ENDLESS, limited(3, true))
+            .expect("a stopped read is not an error");
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.capped_from, None);
+        assert_eq!(result.rows.len(), 3);
+        // A read left open would still hold its shared lock, and this would
+        // be refused as busy.
+        writer
+            .execute("INSERT INTO accounts (id, name) VALUES (3, 'Edsger')", [])
+            .expect("the stopped read should have let go of the database");
+        drop(connection);
+        drop(writer);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_read_inside_the_users_transaction_is_stopped_and_the_transaction_kept() {
+        let connection = memory_with_timeout(ACCOUNTS, 10);
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query(
+                "INSERT INTO accounts (id, name) VALUES (3, 'Edsger')",
+                Fetch::default(),
+            )
+            .unwrap();
+
+        let result = connection.query(ENDLESS, limited(3, true)).unwrap();
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+
+        let count = "SELECT count(*) FROM accounts";
+        let inside = connection.query(count, Fetch::default()).unwrap();
+        assert_eq!(inside.rows, vec![vec![Some("3".to_string())]]);
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+        let after = connection.query(count, Fetch::default()).unwrap();
+        assert_eq!(after.rows, vec![vec![Some("2".to_string())]]);
+    }
+
+    #[test]
+    fn a_write_past_the_limit_runs_to_the_end() {
+        let connection = memory("CREATE TABLE counted (n INTEGER)");
+        let result = connection
+            .query(
+                "
+INSERT INTO counted
+WITH RECURSIVE counting(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counting WHERE n < 100)
+SELECT n FROM counting
+RETURNING n
+",
+                limited(3, false),
+            )
+            .expect("the insert should succeed");
+
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.capped_from, Some(100));
+        let count = connection
+            .query("SELECT count(*) FROM counted", Fetch::default())
+            .unwrap();
+        assert_eq!(count.rows, vec![vec![Some("100".to_string())]]);
     }
 
     /// The database the `live_` tests talk to, seeded from
@@ -1070,6 +1417,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                         2.5 AS fractional,
                         'text' AS words,
                         x'00FF' AS bytes",
+                Fetch::default(),
             )
             .expect("query should succeed");
 
@@ -1092,7 +1440,10 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
     fn a_declared_type_is_a_tag_and_an_expression_has_none() {
         let connection = memory(ACCOUNTS);
         let result = connection
-            .query("SELECT id, name, id + 1 AS next FROM accounts")
+            .query(
+                "SELECT id, name, id + 1 AS next FROM accounts",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["id", "name", "next"]);
@@ -1105,7 +1456,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         let connection = memory(ACCOUNTS);
 
         let result = connection
-            .query("SELECT 1 AS a, 2 AS b; SELECT 4 AS d")
+            .query("SELECT 1 AS a, 2 AS b; SELECT 4 AS d", Fetch::default())
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["d"]);
@@ -1113,7 +1464,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
 
         // A valid empty result still has to carry its headers.
         let empty = connection
-            .query("SELECT id FROM accounts WHERE 0")
+            .query("SELECT id FROM accounts WHERE 0", Fetch::default())
             .expect("query should succeed");
         assert_eq!(names(&empty), vec!["id"]);
         assert!(empty.rows.is_empty());
@@ -1125,14 +1476,17 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
 
         assert_eq!(
             connection
-                .query("SELECT id FROM accounts")
+                .query("SELECT id FROM accounts", Fetch::default())
                 .unwrap()
                 .rows_affected,
             Some(2)
         );
         assert_eq!(
             connection
-                .query("UPDATE accounts SET name = 'Ada L' WHERE id = 1")
+                .query(
+                    "UPDATE accounts SET name = 'Ada L' WHERE id = 1",
+                    Fetch::default()
+                )
                 .unwrap()
                 .rows_affected,
             Some(1)
@@ -1142,7 +1496,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
     #[test]
     fn a_statement_the_engine_refuses_reports_the_engines_own_words() {
         let error = memory(ACCOUNTS)
-            .query("SELECT * FROM no_such_relation")
+            .query("SELECT * FROM no_such_relation", Fetch::default())
             .unwrap_err();
 
         assert!(error.message.contains("no_such_relation"), "{error}");
@@ -1158,8 +1512,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         let connection = memory(ACCOUNTS);
         let error = connection
             .query(
-                "BEGIN;\n                 UPDATE accounts SET name = 'Changed' WHERE id = 1;\n                 UPDATE no_such_relation SET name = 'Changed';\n                 COMMIT;",
-            )
+                "BEGIN;\n                 UPDATE accounts SET name = 'Changed' WHERE id = 1;\n                 UPDATE no_such_relation SET name = 'Changed';\n                 COMMIT;", Fetch::default())
             .unwrap_err();
 
         assert!(error.message.contains("no_such_relation"), "{error}");
@@ -1173,7 +1526,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         );
 
         let after = connection
-            .query("SELECT name FROM accounts WHERE id = 1")
+            .query("SELECT name FROM accounts WHERE id = 1", Fetch::default())
             .expect("the connection should still be usable");
         assert_eq!(after.rows, vec![vec![Some("Ada".to_string())]]);
     }
@@ -1181,7 +1534,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
     #[test]
     fn a_single_table_select_is_editable_by_its_primary_key() {
         let result = memory(ACCOUNTS)
-            .query("SELECT name, id FROM accounts")
+            .query("SELECT name, id FROM accounts", Fetch::default())
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
 
@@ -1197,7 +1550,10 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
     #[test]
     fn an_aliased_or_computed_column_reports_what_the_table_calls_it() {
         let result = memory(ACCOUNTS)
-            .query("SELECT id AS ident, upper(name) AS shouted, name FROM accounts")
+            .query(
+                "SELECT id AS ident, upper(name) AS shouted, name FROM accounts",
+                Fetch::default(),
+            )
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
 
@@ -1226,7 +1582,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         ] {
             assert!(
                 connection
-                    .query(sql)
+                    .query(sql, Fetch::default())
                     .expect("query should succeed")
                     .edit
                     .is_none(),
@@ -1244,6 +1600,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             .query(
                 "SELECT a.id, a.name, b.name
              FROM accounts a JOIN accounts b ON b.id = a.id",
+                Fetch::default(),
             )
             .expect("query should succeed");
 
@@ -1255,7 +1612,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         // There is a rowid that would identify the row, but it is not in the
         // result set, so there is no predicate dbdelve can read off the grid.
         let result = memory("CREATE TABLE unkeyed (value INTEGER, label TEXT); INSERT INTO unkeyed VALUES (1, 'a');")
-            .query("SELECT value, label FROM unkeyed")
+            .query("SELECT value, label FROM unkeyed", Fetch::default())
             .expect("query should succeed");
 
         assert!(result.edit.is_none());
@@ -1271,7 +1628,10 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                 PRIMARY KEY (left_id, right_id)
             );",
         )
-        .query("SELECT label, right_id, left_id FROM composite")
+        .query(
+            "SELECT label, right_id, left_id FROM composite",
+            Fetch::default(),
+        )
         .expect("query should succeed")
         .edit
         .expect("both key columns are in the result set");
@@ -1292,7 +1652,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                     PRIMARY KEY (left_id, right_id)
                 );",
             )
-            .query("SELECT label, left_id FROM composite")
+            .query("SELECT label, left_id FROM composite", Fetch::default())
             .expect("query should succeed")
             .edit
             .is_none()
@@ -1544,17 +1904,45 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         // container reports itself healthy either way. So the volume table is
         // checked by count rather than assumed.
         let result = live()
-            .query("SELECT count(*) AS rows_seeded FROM measurements")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM measurements",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
-        assert_eq!(result.rows[0][0].as_deref(), Some("5000"));
+        assert_eq!(result.rows[0].get(0), Some("5000"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
+    fn live_reads_run_at_once_take_the_time_of_one() {
+        super::super::at_once::reads_overlap(
+            &super::super::Connection::Sqlite(live()),
+            Engine::Sqlite,
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000000)
+             SELECT count(*) FROM n",
+            "INSERT INTO accounts DEFAULT VALUES",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
+    fn live_a_cancel_stops_every_read_run_at_once() {
+        super::super::at_once::a_cancel_stops_them_all(
+            &super::super::Connection::Sqlite(live()),
+            Engine::Sqlite,
+            FOREVER,
+        );
     }
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
     fn live_query_round_trip() {
         let result = live()
-            .query("SELECT id, name FROM accounts ORDER BY id")
+            .query(
+                "SELECT id, name FROM accounts ORDER BY id",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["id", "name"]);
@@ -1616,7 +2004,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
     #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
     fn live_a_single_table_select_is_editable_by_its_primary_key() {
         let edit = live()
-            .query("SELECT name, id FROM accounts")
+            .query("SELECT name, id FROM accounts", Fetch::default())
             .expect("query should succeed")
             .edit
             .expect("accounts has a primary key");
@@ -1634,10 +2022,13 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         // no cross-schema count to check here: a SQLite foreign key cannot
         // reference an attached database.
         let result = live()
-            .query("SELECT count(*) AS rows_seeded FROM order_items")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM order_items",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
-        assert_eq!(result.rows[0][0].as_deref(), Some("3"));
+        assert_eq!(result.rows[0].get(0), Some("3"));
     }
 
     #[test]

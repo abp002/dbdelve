@@ -209,8 +209,8 @@ fn roots(root_certificate: Option<&str>) -> Result<RootCertStore, String> {
         return Ok(store);
     };
 
-    let file =
-        std::fs::File::open(path).map_err(|error| trf!("Could not read {}: {}", path, error))?;
+    let file = std::fs::File::open(crate::store::home_expanded(path))
+        .map_err(|error| trf!("Could not read {}: {}", path, error))?;
     let mut reader = std::io::BufReader::new(file);
     for certificate in rustls_pemfile::certs(&mut reader) {
         let certificate =

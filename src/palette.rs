@@ -30,8 +30,8 @@ use crate::{
     icons::icon,
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
-    theme::{FontSlot, Theme, fonts, install_theme, layout, theme},
-    ui::{chord_hint, object_icon, row_icon},
+    theme::{FontSlot, Theme, fonts, install_theme, layout, theme, user},
+    ui::{chord_hint, object_icon, one_line, row_icon},
     workspace::opacity_for,
 };
 
@@ -47,9 +47,12 @@ pub enum Mode {
     /// with the slot in it rather than three: the list is the same list, and
     /// only the row's destination differs.
     Font(FontSlot),
-    /// Every shipped theme. The highlighted row is installed as it moves, and
-    /// only a confirmed one is kept.
+    /// Every theme, then a row per app to import one from. The highlighted
+    /// theme is installed as it moves, and only a confirmed one is kept.
     Theme,
+    /// Every theme one app has on this machine, previewed as the theme list
+    /// previews, and imported when confirmed.
+    ImportTheme(user::Source),
     /// The databases on the active profile's server, as last fetched.
     Database,
     /// The columns of the grid in front, to jump to one of them.
@@ -127,6 +130,10 @@ pub enum Command {
     /// Put the palette back up over the theme list.
     SelectTheme,
     SetTheme(Box<Theme>),
+    /// Put the palette back up over the themes an app has, to import one.
+    BrowseThemes(user::Source),
+    /// By index into [`user::Source::found`], which stands for the process.
+    ImportTheme(user::Source, usize),
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
     SetDatabase(String),
@@ -182,8 +189,8 @@ pub struct Palette {
     /// order on screen is the matcher's order.
     matched: Vec<usize>,
     matcher: Matcher,
-    /// The theme in force when the theme list opened, for a filter that
-    /// matches nothing to fall back to.
+    /// The theme in force when a theme list opened, for a filter that
+    /// matches nothing, or a row that is not a theme, to fall back to.
     unpreviewed: Option<Theme>,
     /// Opacity per theme as of opening, so a previewed theme paints at its own.
     theme_opacity: HashMap<String, f32>,
@@ -194,6 +201,7 @@ impl Palette {
     pub fn new(mode: Mode, workspace: &Workspace, cx: &App) -> Self {
         let items = match (mode, workspace.profile()) {
             (Mode::Theme, _) => theme_items(cx),
+            (Mode::ImportTheme(source), _) => import_items(source),
             (Mode::Jump, Some(profile)) => jump_items(profile),
             (Mode::Commands, Some(profile)) => command_items(workspace, profile, cx),
             (Mode::History, Some(profile)) => history_items(profile),
@@ -207,7 +215,7 @@ impl Palette {
             matched: (0..items.len()).collect(),
             items,
             matcher: Matcher::new(Config::DEFAULT),
-            unpreviewed: (mode == Mode::Theme).then(|| *theme(cx)),
+            unpreviewed: matches!(mode, Mode::Theme | Mode::ImportTheme(_)).then(|| *theme(cx)),
             theme_opacity: workspace.settings.theme_opacity.clone(),
             fallback_opacity: workspace.settings.opacity,
         }
@@ -233,6 +241,7 @@ impl Palette {
             Mode::History => tr("Recall a statement you have run…"),
             Mode::Font(_) => tr("Pick a font…"),
             Mode::Theme => tr("Pick a theme…"),
+            Mode::ImportTheme(_) => tr("Import a theme…"),
             Mode::Database => tr("Switch database…"),
             Mode::Columns => tr("Go to a column…"),
         }
@@ -304,10 +313,16 @@ impl ListDelegate for Palette {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
+        let message = match self.mode {
+            Mode::ImportTheme(source) if self.items.is_empty() => {
+                trf!("No {} themes found on this machine.", source.name())
+            }
+            _ => tr("No matches.").to_string(),
+        };
         div()
             .p(px(layout::SPACE_MD))
             .text_color(theme(cx).text_muted)
-            .child(tr("No matches."))
+            .child(message)
     }
 
     /// The live preview. Nothing here is saved, and nothing here undoes it:
@@ -320,6 +335,7 @@ impl ListDelegate for Palette {
     ) {
         let previewed = match ix.and_then(|ix| self.command(ix.row)) {
             Some(Command::SetTheme(candidate)) => Some(**candidate),
+            Some(Command::ImportTheme(source, index)) => source.theme(*index),
             _ => self.unpreviewed,
         };
         if let Some(previewed) = previewed {
@@ -421,6 +437,10 @@ fn history_items(profile: &Profile) -> Vec<Item> {
         .history
         .iter()
         .map(|sql| Item {
+            // The label is what the matcher scores as well as what the row
+            // reads as, so collapsing the whitespace is also what makes
+            // `select from accounts` find a statement whose `FROM` was on its
+            // own line.
             label: one_line(sql),
             hint: "".into(),
             icon: icon::HISTORY,
@@ -462,22 +482,56 @@ fn font_items(slot: FontSlot, cx: &App) -> Vec<Item> {
         .collect()
 }
 
-/// Every theme dbdelve ships, in [`Theme::all`] order, the one in force marked
-/// the way the font list marks its family.
+/// Every theme, in [`Theme::all`] order, the one in force marked the way the
+/// font list marks its family. The ways to import one follow, after the
+/// themes, so the list opens on a theme and reads as themes first, as the
+/// command palette lists its import rows after the work.
 fn theme_items(cx: &App) -> Vec<Item> {
     let current = theme(cx).name;
-    Theme::all()
-        .into_iter()
-        .map(|candidate| Item {
-            label: candidate.name.to_string(),
-            hint: if candidate.name == current {
-                tr("current")
+    let themes = Theme::all().into_iter().map(|candidate| Item {
+        label: candidate.name.to_string(),
+        hint: if candidate.name == current {
+            "current"
+        } else {
+            ""
+        }
+        .into(),
+        icon: icon::THEME,
+        command: Command::SetTheme(Box::new(candidate)),
+    });
+    let imports = user::Source::ALL.into_iter().map(|source| {
+        Item::command(
+            &trf!("Import from {}…", source.name()),
+            "",
+            icon::PLUS,
+            Command::BrowseThemes(source),
+        )
+    });
+    themes.chain(imports).collect()
+}
+
+/// Every theme one app has, without the app's name every one of them is
+/// prefixed with, since the list is that app's alone. One already imported is
+/// marked, since importing it again only writes the same file over itself.
+fn import_items(source: user::Source) -> Vec<Item> {
+    source
+        .found()
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| Item {
+            label: candidate
+                .name
+                .split_once(": ")
+                .map_or(candidate.name, |(_, name)| name)
+                .to_string(),
+            hint: if user::is_imported(candidate.name) {
+                tr("imported")
             } else {
                 ""
             }
             .into(),
             icon: icon::THEME,
-            command: Command::SetTheme(Box::new(candidate)),
+            command: Command::ImportTheme(source, index),
         })
         .collect()
 }
@@ -501,14 +555,6 @@ fn database_items(profile: &Profile) -> Vec<Item> {
             command: Command::SetDatabase(name.clone()),
         })
         .collect()
-}
-
-/// A statement as a row: one line, however many it was written across. The
-/// label is what the matcher scores as well as what the row reads as, so
-/// collapsing the whitespace is also what makes `select from accounts` find a
-/// statement whose `FROM` was on its own line.
-fn one_line(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The verbs, filtered to the ones that mean something from where the user is
@@ -630,7 +676,10 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             // The same gates the pager buttons stand behind: forward only off
             // a full page, backwards only off a page that is not the first.
             if !*showing_structure {
-                if matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit) {
+                if matches!(
+                    query,
+                    QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+                ) {
                     items.push(Item::command(
                         tr("Next page"),
                         "",

@@ -65,7 +65,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
-        let preview_rows = self.settings.preview_rows;
+        let row_limit = self.settings.row_limit;
         let sorting = Sorting::new(self.settings.client_sort);
         let engine = self.engine();
         let profile = self.profile_mut()?;
@@ -105,11 +105,12 @@ impl Workspace {
                     filter,
                     filters,
                     next_join: Conjunction::default(),
-                    limit: preview_rows,
+                    limit: row_limit,
                     offset: 0,
                     stale: false,
                     hydrated: false,
                     row_panel_folded: false,
+                    row_panel_filter: Default::default(),
                     row_panel_split: cx.new(|_| ResizableState::default()),
                     count: RowCount::Unasked,
                 }
@@ -144,6 +145,16 @@ impl Workspace {
         let ObjectBody::Relation { query, stale, .. } = &tab.body else {
             return;
         };
+        // The connect's completion runs the tab in front, and switching back to
+        // the profile runs it if the connect landed behind another one. Run
+        // now, it would only fail on the connection still opening -- over the
+        // snapshot it was restored with.
+        if matches!(
+            self.profile().map(|profile| &profile.state),
+            Some(ProfileState::Connecting)
+        ) {
+            return;
+        }
         // A tab restored from a snapshot is `Complete` over rows nothing has
         // checked against the server, so it gets exactly one run -- and its
         // structure, which no snapshot keeps.
@@ -168,7 +179,7 @@ impl Workspace {
     pub(crate) fn requery_relation(
         &mut self,
         id: u64,
-        change: impl FnOnce(&mut String, &mut Vec<SortKey>, &mut usize, &mut usize) -> bool,
+        change: impl FnOnce(&mut String, &mut Vec<SortKey>, &mut Option<usize>, &mut usize) -> bool,
         cx: &mut Context<Self>,
     ) {
         let engine = self.engine();
@@ -307,7 +318,7 @@ impl Workspace {
 
         let task = cx
             .background_executor()
-            .spawn(async move { connection.generated(&sql, &cancel) });
+            .spawn(async move { connection.generated(&sql, &cancel, None) });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
             _ = workspace.update(cx, |workspace, cx| {
@@ -335,7 +346,7 @@ impl Workspace {
                     result
                         .rows
                         .first()
-                        .and_then(|row| row.first()?.as_deref()?.trim().parse::<u64>().ok())
+                        .and_then(|row| row.get(0)?.trim().parse::<u64>().ok())
                 });
                 *count = match rows {
                     Ok(Some(rows)) if current => RowCount::Counted(asked, rows),
@@ -768,7 +779,7 @@ impl Workspace {
                     .map(|(index, label, sql)| {
                         let answer = match sql {
                             Some(sql) => connection
-                                .generated(&sql, &CancelToken::default())
+                                .generated(&sql, &CancelToken::default(), None)
                                 .map(|result| !result.rows.is_empty())
                                 .map_err(|error| error.message),
                             None => Err(tr(
@@ -968,7 +979,7 @@ impl Workspace {
                 cx.notify();
             });
         }
-        let preview_rows = self.settings.preview_rows;
+        let row_limit = self.settings.row_limit;
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -1010,7 +1021,11 @@ impl Workspace {
                     // is where they are stored: the snapshot is keyed by this
                     // expression, so the two cannot disagree.
                     *filter = snapshot.filter.clone();
-                    *limit = snapshot.limit.unwrap_or(preview_rows);
+                    *limit = match snapshot.limit {
+                        Some(0) => None,
+                        Some(rows) => Some(rows),
+                        None => row_limit,
+                    };
                     *stale = true;
                 }
             }
@@ -1062,8 +1077,10 @@ impl Workspace {
                 // at, and `start` only feeds the line number in the failure
                 // dialog, which a restored result never raises -- it is
                 // `Complete` or nothing. Keep the offset in the snapshot if a
-                // failed one is ever restored too.
-                start: 0,
+                // failed one is ever restored too. Distinct all the same:
+                // a header sort reruns a result as a lane, which finds its
+                // entry by `start`.
+                start: index,
                 sql: snapshot.last_query.clone().unwrap_or_default(),
                 state: restored_state(&snapshot),
                 grid,
@@ -1172,11 +1189,12 @@ impl Workspace {
     }
 
     /// Turn the object tabs read back from disk into live ones. A relation is
-    /// opened as soon as there is a connection to query, because everything its
-    /// tab needs is on disk; only a routine, whose body the tab renders, waits
-    /// for the catalog's routines. Anything the database no longer has simply does not
-    /// come back -- a relation it has dropped comes back as a tab whose query
-    /// fails, which says so where silence did not.
+    /// opened at once, before any connection, because everything its tab
+    /// needs is on disk and its snapshot is what it was showing; only a
+    /// routine, whose body the tab renders, waits for the catalog's routines.
+    /// Anything the database no longer has simply does not come back -- a
+    /// relation it has dropped comes back as a tab whose query fails, which
+    /// says so where silence did not.
     pub(crate) fn restore_objects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.profile() else {
             return;
@@ -1187,7 +1205,6 @@ impl Workspace {
         }
         let (opened, still_pending) = restorable(
             profile.config.engine(),
-            profile.connection().is_some(),
             &profile.catalog,
             &profile.session.pending_objects,
         );
@@ -1231,7 +1248,6 @@ impl Workspace {
 /// about whether the routine still exists.
 fn restorable(
     engine: Engine,
-    connected: bool,
     catalog: &CatalogState,
     pending: &[store::StoredObject],
 ) -> (Vec<(OpenedObject, bool)>, Vec<store::StoredObject>) {
@@ -1251,7 +1267,7 @@ fn restorable(
                 ),
                 _ => still_pending.push(stored.clone()),
             }
-        } else if connected {
+        } else {
             let (filter, filters) = restored_filter(engine, stored);
             opened.push((
                 OpenedObject::Relation {
@@ -1268,8 +1284,6 @@ fn restorable(
                 },
                 stored.active,
             ));
-        } else {
-            still_pending.push(stored.clone());
         }
     }
     (opened, still_pending)
@@ -1375,20 +1389,30 @@ mod tests {
         // Relations are in, routines are not: the relation opens, and the
         // routine is neither resolved against a catalog without it nor dropped.
         for routines in [Routines::Loading, Routines::Failed] {
-            let (opened, waiting) =
-                restorable(Engine::Postgres, true, &catalog_with(routines), &pending);
+            let (opened, waiting) = restorable(Engine::Postgres, &catalog_with(routines), &pending);
             assert_eq!(opened.len(), 1);
             assert_eq!(opened[0].0.name(), "accounts");
             assert_eq!(waiting, [stored("digest()", true)]);
         }
 
-        let (opened, waiting) = restorable(
-            Engine::Postgres,
-            true,
-            &catalog_with(Routines::Loaded),
-            &pending,
-        );
+        let (opened, waiting) =
+            restorable(Engine::Postgres, &catalog_with(Routines::Loaded), &pending);
         assert_eq!(opened.len(), 2);
+        assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_stored_relation_opens_before_the_connection_and_the_catalog() {
+        let pending = [store::StoredObject {
+            active: true,
+            ..stored("accounts", false)
+        }];
+
+        let (opened, waiting) = restorable(Engine::Postgres, &CatalogState::Loading, &pending);
+
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].0.name(), "accounts");
+        assert!(opened[0].1, "the tab that was in front comes back in front");
         assert!(waiting.is_empty());
     }
 

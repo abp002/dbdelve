@@ -32,26 +32,45 @@ impl Workspace {
         if !self.row_panel.on_screen.get() {
             return;
         }
-        let Some(profile) = self.profile_mut() else {
-            return;
-        };
-        match profile.session.active {
-            Tab::Query(id) => {
-                if let Some(tab) = profile.session.query_tab_mut(id) {
-                    tab.row_panel_folded = !tab.row_panel_folded;
-                }
-            }
-            Tab::Object(id) => {
-                if let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id)
-                    && let ObjectBody::Relation {
-                        row_panel_folded, ..
-                    } = &mut tab.body
-                {
-                    *row_panel_folded = !*row_panel_folded;
-                }
-            }
+        if let Some((folded, _)) = self.active_row_panel() {
+            *folded = !*folded;
         }
         cx.notify();
+    }
+
+    /// The tab in front's row-panel state: whether it is folded, and what it
+    /// is filtered by. `None` for a tab with no rows to inspect.
+    pub(crate) fn active_row_panel(&mut self) -> Option<(&mut bool, &mut gpui::SharedString)> {
+        let session = &mut self.profile_mut()?.session;
+        match session.active {
+            Tab::Query(id) => session
+                .query_tab_mut(id)
+                .map(|tab| (&mut tab.row_panel_folded, &mut tab.row_panel_filter)),
+            Tab::Object(id) => match &mut session.objects.iter_mut().find(|tab| tab.id == id)?.body
+            {
+                ObjectBody::Relation {
+                    row_panel_folded,
+                    row_panel_filter,
+                    ..
+                } => Some((row_panel_folded, row_panel_filter)),
+                _ => None,
+            },
+        }
+    }
+
+    /// Show the tab in front's filter in the row panel's field, which every
+    /// tab shares. From render, before the panel reads the field, for the
+    /// reason `sync_page_input` gives: a tab comes to the front in more places
+    /// than one.
+    pub(crate) fn sync_row_panel_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.row_panel.search.clone();
+        let Some((_, filter)) = self.active_row_panel() else {
+            return;
+        };
+        let filter = filter.clone();
+        if input.read(cx).value() != filter {
+            input.update(cx, |state, cx| state.set_value(filter, window, cx));
+        }
     }
 
     pub(crate) fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -166,7 +185,7 @@ impl Workspace {
     /// Written through to disk, so the palette a person picked is the one the
     /// next launch paints.
     pub(crate) fn set_theme(&mut self, theme: Theme, window: &mut Window, cx: &mut Context<Self>) {
-        // `set_font_size` and `set_preview_rows` both skip the write-through
+        // `set_font_size` and `set_default_row_limit` both skip the write-through
         // when nothing changed; picking the theme already installed should not
         // rewrite `profiles.toml` or re-post the notice either.
         if theme.name == theme::theme(cx).name {
@@ -185,6 +204,31 @@ impl Workspace {
         }
         self.remember_profiles(cx);
         cx.refresh_windows();
+    }
+
+    /// The theme is written into dbdelve's own directory first, so picking it
+    /// is the same pick a theme already listed would be.
+    pub(crate) fn import_theme(
+        &mut self,
+        source: theme::user::Source,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match theme::user::import(source, index) {
+            // `set_theme` skips a theme already in force by name, and a
+            // re-import may have brought it new colours.
+            Ok(theme) if theme.name == theme::theme(cx).name => {
+                install_theme(
+                    theme.with_opacity(self.settings.opacity_for(&theme)),
+                    window,
+                    cx,
+                );
+                cx.refresh_windows();
+            }
+            Ok(theme) => self.set_theme(theme, window, cx),
+            Err(message) => self.note(message, cx),
+        }
     }
 
     /// Written through to disk like the zoom, and reinstalled rather than
@@ -239,7 +283,7 @@ impl Workspace {
         self.set_opacity(stepped, window, cx);
     }
 
-    /// Return to the editor, backing out of whatever is in front of it.
+    /// Back out of whatever dbdelve has in front of the tab, one layer at a time.
     pub(crate) fn show_editor(
         &mut self,
         _: &ShowEditor,
@@ -275,10 +319,11 @@ impl Workspace {
             return;
         }
         // Whatever is in front, in the order it is stacked: the palette paints
-        // over the settings modal, which paints over the discard-close
-        // confirmation, which paints over the close confirmation, which paints
-        // over the new-row form, which paints over the apply review, which
-        // paints over the surface -- so `escape`
+        // over the settings modal, which paints over the stale-edit prompt,
+        // the stopped-run prompt and the run prompt, which paint over the
+        // discard-close confirmation, which paints over the close
+        // confirmation, which paints over the new-row form, which paints over
+        // the apply review, which paints over the surface -- so `escape`
         // backs out of them in that order, one at a time. The palette stays
         // first so that picking a font from inside settings closes the font
         // list and leaves the modal it was opened from standing.
@@ -292,6 +337,17 @@ impl Workspace {
             return;
         }
         if self.cancel_stale_edit(cx) {
+            return;
+        }
+        // Gated on what is drawn, not on the state alone: `queue_failure`
+        // outlives the queue it was about when a new run replaces it, and an
+        // `escape` meant for something else must not stop that new queue.
+        if self.render_queue_failure(cx).is_some() {
+            self.stop_queue(cx);
+            return;
+        }
+        if self.render_pending_run(cx).is_some() {
+            self.cancel_pending_run(cx);
             return;
         }
         if self.cancel_discard_close(cx) {
@@ -326,21 +382,12 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if matches!(profile.session.active, Tab::Query(_)) {
-            // Nothing of dbdelve's is stacked over the editor, so the keystroke
-            // is not ours. Handing it on is what lets the completion popup --
-            // which is the input's, not dbdelve's -- close on `escape`; this
-            // binding is unscoped and would otherwise win it at every depth.
-            cx.propagate();
-            return;
-        }
-        let Some(&QueryTab { id, .. }) = profile.session.queries.first() else {
-            return;
-        };
-        profile.session.active = Tab::Query(id);
-        profile.session.editor_needs_focus = true;
-        self.remember_profiles(cx);
-        cx.notify();
+        // Nothing of dbdelve's is stacked over the tab, so the keystroke is not
+        // ours. Handing it on is what lets the completion popup close and a
+        // grid cell's input cancel its edit; this binding is unscoped and would
+        // otherwise win it at every depth. Never a tab switch, on any tab: that
+        // is what used to take the `escape` meant for a cell edit.
+        cx.propagate();
     }
 
     /// `tab` takes the highlighted suggestion, and indents when there is none
@@ -464,10 +511,30 @@ impl Workspace {
         let Some((QueryState::Running { cancel, .. }, _)) = profile.session.slot(tab) else {
             return;
         };
-        let cancel = cancel.clone();
-        let cancel_task = cx
-            .background_executor()
-            .spawn(async move { connection.cancel(&cancel) });
+        let mut cancels = vec![cancel.clone()];
+        // A queue's statements running at once are each stopped by their own.
+        if let Tab::Query(id) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab(id)
+                .and_then(|query| query.queue.as_ref())
+        {
+            cancels.extend(
+                queue
+                    .done
+                    .iter()
+                    .filter_map(|finished| match &finished.state {
+                        QueryState::Running { cancel, .. } => Some(cancel.clone()),
+                        _ => None,
+                    }),
+            );
+        }
+        let cancel_task = cx.background_executor().spawn(on_own_thread(move || {
+            cancels
+                .iter()
+                .map(|cancel| connection.cancel(cancel))
+                .fold(Ok(()), Result::and)
+        }));
         // Said as `cancel_query` says it: the tab has gone, so a statement
         // still running behind it is all the more worth knowing about.
         cx.spawn(async move |workspace, cx| {

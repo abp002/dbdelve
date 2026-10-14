@@ -244,7 +244,10 @@ impl Workspace {
             return;
         };
         let can_turn = match forward {
-            true => matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit),
+            true => matches!(
+                query,
+                QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+            ),
             false => *offset > 0,
         };
         if !can_turn {
@@ -253,9 +256,12 @@ impl Workspace {
         self.requery_relation(
             id,
             move |_, _, limit, offset| {
+                let Some(limit) = *limit else {
+                    return false;
+                };
                 match forward {
-                    true => *offset += *limit,
-                    false => *offset = offset.saturating_sub(*limit),
+                    true => *offset += limit,
+                    false => *offset = offset.saturating_sub(limit),
                 }
                 true
             },
@@ -293,7 +299,10 @@ impl Workspace {
         self.requery_relation(
             id,
             move |_, _, limit, offset| {
-                *offset = page * *limit;
+                let Some(limit) = *limit else {
+                    return false;
+                };
+                *offset = page * limit;
                 true
             },
             cx,
@@ -317,7 +326,9 @@ impl Workspace {
             .session
             .active_object()
             .and_then(|tab| match &tab.body {
-                ObjectBody::Relation { limit, offset, .. } => Some(offset / limit + 1),
+                ObjectBody::Relation { limit, offset, .. } => {
+                    Some(limit.map_or(1, |limit| offset / limit + 1))
+                }
                 _ => None,
             });
         let Some(page) = page else {
@@ -357,7 +368,20 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
+        // Asked of the tab, not the grid on screen, which can be a finished
+        // result of a queue whose next statement is still running. A sort
+        // that runs SQL would be refused by that run after it had already
+        // rewritten the buffer, and rows still arriving would be ordered only
+        // in part.
         let tab = profile.session.active;
+        if profile.session.running(tab) {
+            self.note(
+                "A statement is still running on this tab. Sort once it finishes, or cancel it."
+                    .into(),
+                cx,
+            );
+            return;
+        }
         if profile
             .session
             .sorting(tab)
@@ -419,14 +443,9 @@ impl Workspace {
             return;
         };
         let tab = profile.session.active;
-        // On a queue the two differ. Into memory, what gets sorted is the
-        // result in front; into the server, the keys are spliced into the
-        // statement behind the tab's own slot, so they must name its columns.
-        let source = match client {
-            true => profile.session.active_results(),
-            false => profile.session.results(tab),
-        };
-        let Some(results) = source.cloned() else {
+        // Either way the result in front: `reorder_query` splices into the
+        // statement behind it.
+        let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
         let (order, shown) = {
@@ -497,8 +516,8 @@ impl Workspace {
         let engine = self.engine();
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.active_query_tab())
-            .map(|tab| tab.results.clone())
+            .and_then(|profile| profile.session.active_results())
+            .cloned()
         else {
             return;
         };
@@ -529,9 +548,62 @@ impl Workspace {
         };
         let tab_id = tab.id;
         let editor = tab.editor.clone();
-        let Some(last_query) = tab.last_query.clone() else {
-            return false;
+        let (in_turn, mode) = (profile.in_turn(), profile.mode);
+        // A header click refuses this itself; the sorting chips come here
+        // without asking.
+        let running = profile.session.running(Tab::Query(tab_id));
+        // On a queue, the result the switcher shows. Only the last of them is
+        // the tab's slot, which `last_query` describes.
+        let queued = tab.queue.as_ref().and_then(|queue| {
+            let finished = queue.done.get(queue.showing)?;
+            (finished.grid != tab.results).then(|| (queue.showing, finished.sql.clone()))
+        });
+        // An earlier result reruns as a lane, which only a queue with nothing
+        // left to send can take: one still out, or parked on a failure,
+        // would land its own results around it.
+        let unfinished = tab
+            .queue
+            .as_ref()
+            .is_some_and(|queue| !queue.remaining.is_empty() || queue.awaiting || queue.at_once());
+        // A lane finds its result by where its statement starts, which a
+        // batch's further sets share with its first.
+        let unreachable = tab.queue.as_ref().is_some_and(|queue| {
+            queue
+                .done
+                .get(queue.showing)
+                .is_some_and(|finished| queue.lane(finished.start) != Some(queue.showing))
+        });
+        let (queued, last_query) = match queued {
+            Some((index, sql)) => (Some(index), sql),
+            None => match tab.last_query.clone() {
+                Some(sql) => (None, sql),
+                None => return false,
+            },
         };
+        if running {
+            self.note(
+                "A statement is still running on this tab. Sort once it finishes, or cancel it."
+                    .into(),
+                cx,
+            );
+            return false;
+        }
+        if queued.is_some() && unfinished {
+            self.note(
+                "Sort this result once the rest of the run has finished.".into(),
+                cx,
+            );
+            return false;
+        }
+        if queued.is_some() && unreachable {
+            self.note(
+                "These rows are one of several sets a batch returned, and cannot be sorted on \
+                 their own."
+                    .into(),
+                cx,
+            );
+            return false;
+        }
         // A sort re-runs the statement behind the grid, and one that writes
         // would write again.
         if !sql::rerunnable(engine, &last_query) {
@@ -549,7 +621,9 @@ impl Workspace {
         };
         // The grid's own statement, not whatever the cursor is on: that may be
         // another statement entirely, and one that never ran.
-        let Some(range) = Buffer::for_engine(engine, &text).find(&text, cursor, &last_query) else {
+        let Some(range) =
+            Buffer::for_engine(engine, &text).find(engine, &text, cursor, &last_query)
+        else {
             self.note(
                 tr("The statement behind these rows is no longer in the editor.").into(),
                 cx,
@@ -576,12 +650,37 @@ impl Workspace {
             );
             return false;
         };
+        // An earlier result reruns on a connection of its own, as the queue's
+        // reads did when they ran at once.
+        if queued.is_some() {
+            let refusal = match in_turn {
+                Some(_) => Some(
+                    "Only the last result can be sorted by the server while this connection \
+                     has a transaction open or changed session settings. Use Client sorting \
+                     for this one.",
+                ),
+                None if !session::runs_at_once(engine, mode, &[&sorted]) => Some(
+                    "Only the last result can be sorted by the server unless its statement \
+                     is a plain read. Use Client sorting for this one.",
+                ),
+                None => None,
+            };
+            if let Some(refusal) = refusal {
+                self.note(refusal.into(), cx);
+                return false;
+            }
+        }
 
         let mut replaced = text.clone();
         replaced.replace_range(range, &sorted);
         editor.update(cx, |editor, cx| editor.set_value(replaced, window, cx));
-        self.execute_sql(sorted, Tab::Query(tab_id), cx);
-        true
+        match queued {
+            Some(index) => self.rerun_queued(Tab::Query(tab_id), index, sorted, cx),
+            None => {
+                self.execute_sql(sorted, Tab::Query(tab_id), cx);
+                true
+            }
+        }
     }
 
     /// `Enter` on the active cell opens an input on it. Everything after this
@@ -1039,7 +1138,7 @@ impl Workspace {
     /// rules: the rows the server returned, no pending edits, and a capped
     /// snapshot refused rather than copied short.
     pub(crate) fn copy_results_as(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot(tr("copying"), cx) {
+        if self.refuse_capped(tr("copying"), cx) {
             return;
         }
         let Some(results) = self
@@ -1101,24 +1200,75 @@ impl Workspace {
     }
 
     /// A restored snapshot holds at most `GRID_ROW_CAP` rows of a larger
-    /// result. Writing those out is quietly short of what the status bar says
-    /// the tab is showing, so this says how to get the rest instead.
-    fn refuse_capped_snapshot(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
+    /// result, and a run at most the row limit. Writing those out is quietly
+    /// short of what the status bar says the tab is showing, so this says how
+    /// to get the rest instead.
+    fn refuse_capped(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
+        let streaming = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            .is_some_and(|results| results.read(cx).delegate().streamed_set().is_some());
+        if streaming {
+            self.note(
+                trf!(
+                    "Rows are still arriving. Wait for the statement to finish before {}.",
+                    doing
+                ),
+                cx,
+            );
+            return true;
+        }
+        let stopped = self.profile().and_then(|profile| {
+            let grid = profile.session.active_results()?.read(cx).delegate();
+            Some((grid.result().rows.len(), grid.result().stopped?))
+        });
+        if let Some((showing, stopped)) = stopped {
+            let showing = group_thousands(showing as u64);
+            self.note(
+                match stopped {
+                    db::Stopped::AtLimit => trf!(
+                        "This tab is showing the first {} rows, the row limit. Raise it and run the statement again before {}.",
+                        showing,
+                        doing
+                    ),
+                    db::Stopped::Cancelled => trf!(
+                        "This tab is showing the {} rows that arrived before the statement was cancelled. Run it again before {}.",
+                        showing,
+                        doing
+                    ),
+                },
+                cx,
+            );
+            return true;
+        }
         let capped = self.profile().and_then(|profile| {
             let grid = profile.session.active_results()?.read(cx).delegate();
             let showing = grid.result().rows.len();
-            (showing < grid.total_rows()).then(|| (showing, grid.total_rows()))
+            (showing < grid.total_rows())
+                .then(|| (showing, grid.total_rows(), grid.captured().is_some()))
         });
-        let Some((showing, total)) = capped else {
+        let Some((showing, total, snapshot)) = capped else {
             return false;
         };
+        let (showing, total) = (
+            group_thousands(showing as u64),
+            group_thousands(total as u64),
+        );
         self.note(
-            trf!(
-                "This tab is showing {} of {} rows from a snapshot. Refresh it before {}.",
-                group_thousands(showing as u64),
-                group_thousands(total as u64),
-                doing
-            ),
+            match snapshot {
+                true => trf!(
+                    "This tab is showing {} of {} rows from a snapshot. Refresh it before {}.",
+                    showing,
+                    total,
+                    doing
+                ),
+                false => trf!(
+                    "This tab is showing {} of {} rows, the row limit. Raise it and run the statement again before {}.",
+                    showing,
+                    total,
+                    doing
+                ),
+            },
             cx,
         );
         true
@@ -1202,7 +1352,7 @@ impl Workspace {
     /// read it off. Pending edits are not written either: this is the result set
     /// the server returned, and applying them is a separate, visible act.
     pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot(tr("exporting"), cx) {
+        if self.refuse_capped(tr("exporting"), cx) {
             return;
         }
         let Some(profile) = self.profile() else {
