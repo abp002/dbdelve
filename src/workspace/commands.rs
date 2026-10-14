@@ -449,6 +449,7 @@ impl Workspace {
             Command::OpenSettings => self.open_settings(&OpenSettings, window, cx),
             Command::GoToColumn => self.go_to_column(&GoToColumn, window, cx),
             Command::RevealColumn(col) => self.reveal_column(col, window, cx),
+            Command::ShowDiagram(schema) => self.open_diagram(schema, window, cx),
         }
     }
 

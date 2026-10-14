@@ -2463,9 +2463,19 @@ impl Workspace {
                             });
                         })
                     };
+                    let diagram_workspace = menu_workspace.clone();
+                    let diagram_schema = schema.clone();
                     let menu = menu
                         .item(open("Open Data", false))
                         .item(open("Open Structure", true))
+                        .item(PopupMenuItem::new("Show schema diagram").on_click(
+                            move |_, window, cx| {
+                                let schema = diagram_schema.clone();
+                                _ = diagram_workspace.update(cx, |workspace, cx| {
+                                    workspace.open_diagram(schema, window, cx);
+                                });
+                            },
+                        ))
                         .separator()
                         .item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
                             let (schema, relation) = ddl_names.clone();

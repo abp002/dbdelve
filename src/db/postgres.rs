@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
@@ -186,6 +186,7 @@ ORDER BY namespace.nspname, procedure.proname, identity_arguments
 // `{relation}` placeholders substituted by `structure_sql`.
 const STRUCTURE_COLUMNS_SQL: &str = "
 SELECT
+    class.relname AS relation_name,
     attribute.attname AS column_name,
     pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) AS data_type,
     CASE WHEN attribute.attnotnull THEN 'no' ELSE 'yes' END AS nullable,
@@ -224,6 +225,7 @@ ORDER BY attribute.attnum
 
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT
+    class.relname AS relation_name,
     index_class.relname AS object_name,
     pg_catalog.pg_get_indexdef(index_entry.indexrelid) AS definition
 FROM pg_catalog.pg_index AS index_entry
@@ -240,6 +242,7 @@ ORDER BY index_class.relname
 
 const STRUCTURE_CONSTRAINTS_SQL: &str = "
 SELECT
+    class.relname AS relation_name,
     table_constraint.conname AS object_name,
     pg_catalog.pg_get_constraintdef(table_constraint.oid) AS definition
 FROM pg_catalog.pg_constraint AS table_constraint
@@ -284,6 +287,7 @@ WHERE namespace.nspname = {schema}
 // composite key's columns in key order.
 const STRUCTURE_FOREIGN_KEYS_SQL: &str = "
 SELECT
+    class.relname AS relation_name,
     source_attribute.attname AS column_name,
     referenced_namespace.nspname AS referenced_schema,
     referenced_class.relname AS referenced_table,
@@ -996,6 +1000,23 @@ impl Connection {
         Ok(structure)
     }
 
+    /// Every relation's structure in `schema`, in four statements on a side
+    /// session rather than four per relation on the user's: the diagram reads
+    /// a whole schema, which on the user's session would queue that many round
+    /// trips ahead of whatever they run next, inside any transaction they
+    /// hold open. The same templates as [`Self::structure`], each relation
+    /// told apart by its `relation_name`.
+    pub fn schema_structures(&self, schema: &str) -> Result<HashMap<String, Structure>, DbError> {
+        let side = Self::connect(&self.server, self.tunnel.clone())?;
+        let read = |template: &str| side.internal_query(&schema_structure_sql(template, schema));
+        super::assemble_schema(
+            read(STRUCTURE_COLUMNS_SQL)?,
+            read(STRUCTURE_INDEXES_SQL)?,
+            read(STRUCTURE_CONSTRAINTS_SQL)?,
+            read(STRUCTURE_FOREIGN_KEYS_SQL)?,
+        )
+    }
+
     /// A view's options are its `WITH (…)`, its check option among them.
     ///
     /// ponytail: a partition is written as a table of its own, without its
@@ -1237,6 +1258,14 @@ fn resolve_edit_target(probed: &[ProbedColumn], table: &KeyedTable) -> Option<Ed
 }
 
 /// A relation name is user data and can contain a quote.
+/// A structure template over every relation of `schema`: the relation it
+/// names is each row's own.
+fn schema_structure_sql(template: &str, schema: &str) -> String {
+    template
+        .replace("{schema}", &super::Engine::Postgres.quote_literal(schema))
+        .replace("{relation}", "class.relname")
+}
+
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     template
         .replace("{schema}", &super::Engine::Postgres.quote_literal(schema))
@@ -2186,6 +2215,41 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_schema_read_whole_is_each_relation_read_alone() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection
+            .internal_query(
+                "DROP SCHEMA IF EXISTS dbdelve_test_whole CASCADE;
+                 CREATE SCHEMA dbdelve_test_whole;
+                 CREATE TABLE dbdelve_test_whole.parent (id int PRIMARY KEY, code text UNIQUE);
+                 CREATE TABLE dbdelve_test_whole.child (
+                     id int PRIMARY KEY,
+                     parent_id int REFERENCES dbdelve_test_whole.parent (id),
+                     note text
+                 );
+                 CREATE INDEX child_note ON dbdelve_test_whole.child (note);
+                 CREATE VIEW dbdelve_test_whole.listed AS SELECT id FROM dbdelve_test_whole.child;",
+            )
+            .expect("the fixture should build");
+
+        let whole = connection
+            .schema_structures("dbdelve_test_whole")
+            .expect("the schema should read whole");
+        for name in ["parent", "child", "listed"] {
+            let alone = connection
+                .structure("dbdelve_test_whole", name)
+                .expect("the relation should read alone");
+            assert_eq!(whole.get(name), Some(&alone), "{name}");
+        }
+        assert_eq!(whole["child"].foreign_keys.len(), 1);
+
+        connection
+            .internal_query("DROP SCHEMA dbdelve_test_whole CASCADE")
+            .expect("the fixture should drop");
     }
 
     fn live_profile() -> super::super::Connection {

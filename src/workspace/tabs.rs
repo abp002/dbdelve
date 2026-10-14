@@ -349,6 +349,14 @@ impl Workspace {
         if self.cancel_close_tab(cx) {
             return;
         }
+        // The diagram sheet paints over the tab and under all of the above,
+        // and the apply review paints over it too.
+        if self.diagram.is_some() && self.close_apply_review(cx) {
+            return;
+        }
+        if self.close_diagram(cx) {
+            return;
+        }
         // Before the apply review, though confirming a row clears the form in
         // the same step that opens the review, so the two are never both open
         // on one tab. `close_new_row` is scoped to the active tab's own form,

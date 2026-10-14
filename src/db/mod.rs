@@ -13,6 +13,7 @@
 //! engine's catalog SQL aliases its columns to names chosen here rather than to
 //! its own.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1394,6 +1395,19 @@ impl Connection {
         }
     }
 
+    /// Every relation's structure in `schema` at once, keyed by relation name,
+    /// on a session of its own. `None` where the engine is read one relation
+    /// at a time only, through [`Connection::structure`].
+    pub fn schema_structures(
+        &self,
+        schema: &str,
+    ) -> Option<Result<HashMap<String, Structure>, DbError>> {
+        match self {
+            Self::Postgres(connection) => Some(connection.schema_structures(schema)),
+            _ => None,
+        }
+    }
+
     /// The statements that would create this relation, for the clipboard:
     /// nothing dbdelve does runs them. The server's own rendering wherever it
     /// has one; Postgres and SQL Server tables are written back out of their
@@ -2494,6 +2508,50 @@ pub(super) fn terminated(statement: &str) -> String {
 /// four aliases, so the row-to-struct step is the same work twice; SQLite does
 /// not use this at all, because `PRAGMA foreign_key_list` reports a different
 /// shape. No engine branches here and no engine has to route through it.
+/// The structure queries read over a whole schema, each row carrying its
+/// `relation_name`, sorted into one [`Structure`] per relation. A relation
+/// with no columns is not one the diagram can draw, and is left out.
+pub(super) fn assemble_schema(
+    columns: QueryResult,
+    indexes: QueryResult,
+    constraints: QueryResult,
+    keys: QueryResult,
+) -> Result<HashMap<String, Structure>, DbError> {
+    fn by_relation(result: &QueryResult) -> Result<HashMap<String, QueryResult>, DbError> {
+        let mut out: HashMap<String, QueryResult> = HashMap::new();
+        for row in &result.rows {
+            let name = required_cell(result, row, "relation_name")?;
+            out.entry(name.to_string())
+                .or_insert_with(|| QueryResult {
+                    columns: result.columns.clone(),
+                    ..QueryResult::default()
+                })
+                .rows
+                .push(row.clone());
+        }
+        Ok(out)
+    }
+    let (mut indexes, mut constraints, keys) = (
+        by_relation(&indexes)?,
+        by_relation(&constraints)?,
+        by_relation(&keys)?,
+    );
+    by_relation(&columns)?
+        .into_iter()
+        .map(|(name, columns)| {
+            let mut structure = assemble_structure(
+                columns,
+                indexes.remove(&name).unwrap_or_default(),
+                constraints.remove(&name).unwrap_or_default(),
+            )?;
+            if let Some(keys) = keys.get(&name) {
+                structure.foreign_keys = assemble_foreign_keys(keys)?;
+            }
+            Ok((name, structure))
+        })
+        .collect()
+}
+
 pub(super) fn assemble_foreign_keys(result: &QueryResult) -> Result<Vec<ForeignKey>, DbError> {
     result
         .rows
@@ -3656,6 +3714,87 @@ mod tests {
 
         assert_eq!(catalog.schemas[0].relations[0].partition_of, None);
         assert_eq!(catalog.schemas[0].relations[0].size, None);
+    }
+
+    #[test]
+    fn a_schema_read_whole_is_sorted_into_its_relations() {
+        let columns = result(
+            &[
+                "relation_name",
+                "column_name",
+                "data_type",
+                "nullable",
+                "column_default",
+            ],
+            &[
+                &[
+                    Some("parent"),
+                    Some("id"),
+                    Some("int"),
+                    Some("no"),
+                    Some(""),
+                ],
+                &[Some("child"), Some("id"), Some("int"), Some("no"), Some("")],
+                &[
+                    Some("parent"),
+                    Some("code"),
+                    Some("text"),
+                    Some("yes"),
+                    Some(""),
+                ],
+                &[
+                    Some("child"),
+                    Some("parent_id"),
+                    Some("int"),
+                    Some("yes"),
+                    Some(""),
+                ],
+            ],
+        );
+        let constraints = result(
+            &["relation_name", "object_name", "definition"],
+            &[
+                &[
+                    Some("parent"),
+                    Some("parent_pkey"),
+                    Some("PRIMARY KEY (id)"),
+                ],
+                &[Some("child"), Some("child_pkey"), Some("PRIMARY KEY (id)")],
+            ],
+        );
+        let indexes = result(&["relation_name", "object_name", "definition"], &[]);
+        let keys = result(
+            &[
+                "relation_name",
+                "column_name",
+                "referenced_schema",
+                "referenced_table",
+                "referenced_column",
+            ],
+            &[&[
+                Some("child"),
+                Some("parent_id"),
+                Some("public"),
+                Some("parent"),
+                Some("id"),
+            ]],
+        );
+
+        let schema = assemble_schema(columns, indexes, constraints, keys).unwrap();
+
+        assert_eq!(schema.len(), 2);
+        let names = |structure: &Structure| -> Vec<String> {
+            structure
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&schema["parent"]), ["id", "code"]);
+        assert_eq!(names(&schema["child"]), ["id", "parent_id"]);
+        assert_eq!(schema["parent"].primary_key(), ["id"]);
+        assert!(schema["parent"].foreign_keys.is_empty());
+        assert_eq!(schema["child"].foreign_keys[0].referenced_table, "parent");
     }
 
     #[test]

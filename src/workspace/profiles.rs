@@ -1608,6 +1608,9 @@ impl Workspace {
         self.form = None;
         self.switcher_open = false;
         self.pending_removal = None;
+        // The diagram is of the connection being left: a click on it would
+        // open a table of the same name in this one.
+        self.diagram = None;
         // Written here rather than at quit, so the profile in front survives a
         // crash as well as a close.
         self.remember_profiles(cx);

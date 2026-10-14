@@ -148,6 +148,8 @@ pub enum Command {
     GoToColumn,
     /// Scroll the grid in front to this column, by index into its columns.
     RevealColumn(usize),
+    /// Put the schema diagram up over the workspace.
+    ShowDiagram(String),
 }
 
 struct Item {
@@ -924,6 +926,29 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             icon::FONT,
             Command::PickFont(slot),
         ));
+    }
+    if let Some(catalog) = workspace.catalog() {
+        items.extend(
+            catalog
+                .by_name()
+                .into_iter()
+                .filter(|(_, schema)| {
+                    schema.relations.iter().any(|relation| {
+                        matches!(
+                            relation.kind,
+                            RelationKind::Table | RelationKind::PartitionedTable
+                        )
+                    })
+                })
+                .map(|(_, schema)| {
+                    Item::command(
+                        &format!("Diagram of {}", schema.name),
+                        "",
+                        icon::PLAN,
+                        Command::ShowDiagram(schema.name.clone()),
+                    )
+                }),
+        );
     }
     items.push(Item::command(
         "Settings",

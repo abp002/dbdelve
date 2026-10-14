@@ -5,6 +5,7 @@
 //! inherent impl rather than types of their own.
 
 mod commands;
+mod diagram;
 mod editing;
 mod filters;
 mod forms;
@@ -217,6 +218,8 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
+    /// The schema diagram sheet, while it is up.
+    pub(crate) diagram: Option<diagram::DiagramView>,
     /// Why the welcome surface's name field refused what was typed: a line
     /// of its own, so a refusal never covers the notice, which may be the
     /// only word that the profiles file failed to load.
@@ -333,6 +336,7 @@ impl Workspace {
                 .filter(|source| source.found())
                 .collect(),
             welcome_notice: None,
+            diagram: None,
             project_name_error: None,
             welcome_needs_focus: true,
             reveal_on_rows: None,
@@ -494,6 +498,24 @@ impl Workspace {
         cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = event.keystroke.clone();
             this.update(cx, |workspace, cx| {
+                // The diagram sheet covers the tab without being anything a
+                // chord can act on, so it lets through only `escape`, which
+                // closes it, and quitting. Everything else would land on the
+                // tab hidden under it: `cmd-enter` running its statement,
+                // `cmd-w` closing it.
+                if workspace.diagram.is_some()
+                    && !workspace.settings_open
+                    && workspace.palette.is_none()
+                {
+                    if keystroke.key == "escape"
+                        || keybindings::is_modifier(&keystroke.key)
+                        || workspace.is_quit_chord(&keystroke)
+                    {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 // The palette opens over the modal (a font is picked from it) and
                 // holds the keyboard while it does.
                 if !workspace.settings_open
@@ -604,6 +626,17 @@ impl Workspace {
     /// the tab, or the welcome surface when there is no connection. A field
     /// unmounted with focus in it leaves the window focused on nothing, and
     /// every keybinding dead.
+    /// Whether `keystroke` is a chord in force for quitting, the default or
+    /// the user's own.
+    fn is_quit_chord(&self, keystroke: &gpui::Keystroke) -> bool {
+        keybindings::REGISTRY
+            .iter()
+            .filter(|spec| spec.id == "quit")
+            .flat_map(|spec| keybindings::chords_for(spec, &self.settings.custom_keybindings))
+            .filter_map(|chord| gpui::Keystroke::parse(chord).ok())
+            .any(|chord| chord.unparse() == keystroke.unparse())
+    }
+
     pub(crate) fn refocus_front(&mut self) {
         match self.profile_mut() {
             Some(profile) => profile.session.editor_needs_focus = true,
@@ -1862,6 +1895,7 @@ impl Render for Workspace {
                 ],
             ))
             .child(div().flex_1().min_h_0().child(main_pane))
+            .children(self.render_diagram(cx))
             .children(self.render_apply_review(cx))
             .children(self.render_close_confirmation(cx))
             .children(self.render_discard_confirmation(cx))
