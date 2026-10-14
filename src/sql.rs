@@ -352,7 +352,7 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
     // Replacing the existing clause, rather than adding a second one, is what
     // makes a repeated click a change of sort instead of an accumulation.
     if let Some(existing) = child_of_kind(&anchor, "order_by") {
-        return Some(splice(sql, existing.byte_range(), &clause));
+        return Some(splice(sql, &tree, existing.byte_range(), &clause));
     }
 
     if clause.is_empty() {
@@ -363,7 +363,7 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
         .map(|limit| limit.byte_range().start)
         .unwrap_or(anchor.byte_range().end);
 
-    Some(splice(sql, insert_at..insert_at, &clause))
+    Some(splice(sql, &tree, insert_at..insert_at, &clause))
 }
 
 /// A generated preview's page, spelled the way `engine` reads one.
@@ -414,6 +414,7 @@ pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> 
     };
     Some(splice(
         statement,
+        &tree,
         limit.byte_range(),
         &format!("{order}OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY"),
     ))
@@ -1073,9 +1074,20 @@ fn child_of_kind<'tree>(
 /// runs of spaces across the whole statement instead would rewrite string
 /// literals, quoted identifiers and the user's indentation — a silent edit to
 /// what the statement means, which is the one thing this module must not do.
-fn splice(sql: &str, range: Range<usize>, clause: &str) -> String {
+///
+/// The seam is a newline when what comes before it ends in a `--` comment,
+/// which would otherwise run on over the clause and everything after it. The
+/// tree says whether it is one: a `--` inside a string is not, and a newline
+/// there would move the `ORDER BY (SELECT NULL)` that [`unpaged`] reads back
+/// after a space.
+fn splice(sql: &str, tree: &Tree, range: Range<usize>, clause: &str) -> String {
     let head = sql[..range.start].trim_end();
     let tail = sql[range.end..].trim_start();
+    let after_comment = head
+        .len()
+        .checked_sub(1)
+        .and_then(|last| tree.root_node().descendant_for_byte_range(last, head.len()))
+        .is_some_and(|node| node.kind() == "comment");
 
     let mut spliced = String::with_capacity(head.len() + clause.len() + tail.len() + 2);
     spliced.push_str(head);
@@ -1084,7 +1096,11 @@ fn splice(sql: &str, range: Range<usize>, clause: &str) -> String {
             continue;
         }
         if !spliced.is_empty() {
-            spliced.push(' ');
+            let seam = match after_comment && spliced.len() == head.len() {
+                true => '\n',
+                false => ' ',
+            };
+            spliced.push(seam);
         }
         spliced.push_str(part);
     }
@@ -1573,11 +1589,27 @@ pub(crate) fn appended_statement(buffer: &str, statement: &str) -> String {
         return statement.to_string();
     }
 
-    let terminator = match text.ends_with(';') {
-        true => "",
-        false => ";",
-    };
-    format!("{text}{terminator}\n\n{statement}")
+    format!("{}\n\n{statement}", terminated(text))
+}
+
+fn terminated(text: &str) -> String {
+    let mut parser = Parser::new();
+    let end = parser
+        .set_language(&tree_sitter_sequel::LANGUAGE.into())
+        .ok()
+        .and_then(|_| parser.parse(text, None))
+        .and_then(|tree| {
+            let root = tree.root_node();
+            let mut cursor = root.walk();
+            root.children(&mut cursor)
+                .filter(|node| !matches!(node.kind(), "comment" | "marginalia"))
+                .last()
+                .map(|node| node.end_byte())
+        });
+    match end {
+        Some(end) if !text[..end].ends_with(';') => format!("{};{}", &text[..end], &text[end..]),
+        _ => text.to_string(),
+    }
 }
 
 /// What a connection is allowed to do, and what a statement needs in order to
@@ -4371,6 +4403,76 @@ mod tests {
             appended_statement("SELECT 1;", "UPDATE t SET a = 1"),
             "SELECT 1;\n\nUPDATE t SET a = 1"
         );
+    }
+
+    #[test]
+    fn a_sort_spliced_after_a_line_comment_starts_its_own_line() {
+        let by_name = [SortKey::new("name", true)];
+        for (statement, expected) in [
+            (
+                "select * from t -- recent\nlimit 10",
+                "select * from t -- recent\nORDER BY name ASC limit 10",
+            ),
+            (
+                "select * from t -- recent\norder by id limit 10",
+                "select * from t -- recent\nORDER BY name ASC limit 10",
+            ),
+            (
+                "select * from t /* recent */ limit 10",
+                "select * from t /* recent */ ORDER BY name ASC limit 10",
+            ),
+            (
+                "select * from t where note = 'a--b' limit 10",
+                "select * from t where note = 'a--b' ORDER BY name ASC limit 10",
+            ),
+        ] {
+            assert_eq!(
+                with_order_by(Engine::Sqlite, statement, &by_name).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            with_order_by(
+                Engine::Sqlite,
+                "select * from t -- recent\norder by id limit 10",
+                &[]
+            )
+            .as_deref(),
+            Some("select * from t -- recent\nlimit 10")
+        );
+    }
+
+    #[test]
+    fn a_comment_marker_inside_a_string_still_unpages_on_sql_server() {
+        for value in ["'a--b'", "'a#b'"] {
+            let preview =
+                format!("SELECT * FROM \"t\" WHERE \"name\" = {value} LIMIT 100 OFFSET 0");
+            let paged = paged(Engine::SqlServer, &preview, &["id".into()]).unwrap();
+
+            assert_eq!(unpaged(&paged), preview, "{paged}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_comment_does_not_swallow_the_terminator() {
+        for (buffer, expected) in [
+            ("SELECT 1 -- note", "SELECT 1; -- note"),
+            ("SELECT 1 -- note;", "SELECT 1; -- note;"),
+            ("SELECT 1 /* note */", "SELECT 1; /* note */"),
+            ("SELECT 1; -- note", "SELECT 1; -- note"),
+            ("SELECT 1; /* note; */", "SELECT 1; /* note; */"),
+            ("SELECT 'a;'", "SELECT 'a;';"),
+            ("SELECT 1;;", "SELECT 1;;"),
+        ] {
+            let appended = appended_statement(buffer, "UPDATE t SET a = 1");
+
+            assert_eq!(appended, format!("{expected}\n\nUPDATE t SET a = 1"));
+            assert_eq!(
+                Buffer::parse(&appended).statements().len(),
+                2,
+                "{appended:?}"
+            );
+        }
     }
 
     #[test]
